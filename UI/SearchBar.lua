@@ -11,6 +11,9 @@ local Font = ns:GetModule("Font")
 
 local instances = {}
 local searchOverlay = nil
+-- True on clients that cannot support the full-screen click catcher; see
+-- CreateSearchOverlay. Callers must treat searchOverlay as optional.
+local overlayUnavailable = false
 
 -- Debounce for the search-text notify. Each keystroke triggers a full bag/bank/guild
 -- bank Refresh (~tens of ms), so firing per character makes fast typing lag. Coalesce
@@ -65,6 +68,25 @@ local SPECIAL_CHIPS = {
 -------------------------------------------------
 local function CreateSearchOverlay()
     if searchOverlay then return end
+
+    -- This is a FULL-SCREEN, mouse-enabled click catcher. It only works because
+    -- SetPropagateMouseClicks/MouseMotion (Dragonflight 10.x) let the click pass
+    -- THROUGH to whatever is underneath while still notifying us.
+    --
+    -- Without them the overlay simply eats every click in the game: you cannot
+    -- cast, loot, turn the camera or click the world at all for as long as the
+    -- search box has focus. Pre-10.x there is no way to make it behave, so on
+    -- those clients we do not create it. Losing focus by pressing Escape/Enter,
+    -- or clicking another edit box, still works -- only the click-anywhere-to-
+    -- dismiss convenience is gone, which is a fair trade for a usable mouse.
+    local probe = CreateFrame("Button", nil, UIParent)
+    local canPropagate = probe.SetPropagateMouseClicks ~= nil
+    probe:Hide()
+    probe:EnableMouse(false)
+    if not canPropagate then
+        overlayUnavailable = true
+        return
+    end
 
     local overlay = CreateFrame("Button", "GudaBagsSearchOverlay", UIParent)
     overlay:SetAllPoints(UIParent)
@@ -1212,11 +1234,11 @@ local function CreateSearchBar(parent)
     end)
 
     searchBox:HookScript("OnEditFocusGained", function()
-        searchOverlay:Show()
+        if searchOverlay then searchOverlay:Show() end
     end)
 
     searchBox:HookScript("OnEditFocusLost", function(self)
-        searchOverlay:Hide()
+        if searchOverlay then searchOverlay:Hide() end
         -- Clear search text when clicking outside all GudaBags frames
         local overAnyFrame = false
         for parent, _ in pairs(instances) do

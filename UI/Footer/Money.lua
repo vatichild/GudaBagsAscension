@@ -144,8 +144,12 @@ end
 -- Right-click dropdown menu for gold options
 local goldDropdown = CreateFrame("Frame", "GudaBagsGoldDropdown", UIParent, "UIDropDownMenuTemplate")
 
--- Click-away overlay to close dropdown when clicking outside
-local clickAwayOverlay = CreateFrame("Button", nil, UIParent)
+-- Click-away overlay to close dropdown when clicking outside.
+--
+-- NAMED so it can be identified: this is a FULL-SCREEN mouse-enabled frame, and
+-- an unnamed one is nearly impossible to track down when it gets stuck shown
+-- (it blocks targeting, camera and action bars while producing no error).
+local clickAwayOverlay = CreateFrame("Button", "GudaBagsGoldClickAway", UIParent)
 clickAwayOverlay:SetAllPoints(UIParent)
 clickAwayOverlay:SetFrameStrata("DIALOG")
 clickAwayOverlay:EnableMouse(true)
@@ -237,8 +241,25 @@ local function ShowGoldMenu(frame)
         end
     end, "MENU")
     ToggleDropDownMenu(1, nil, goldDropdown, frame, 0, frame:GetHeight())
-    clickAwayOverlay:Show()
-    clickAwayOverlay:SetFrameLevel(goldDropdown:GetFrameLevel() - 1)
+
+    -- The overlay's only reliable hide paths are its own OnClick and
+    -- goldDropdown's OnHide. The latter NEVER fires pre-Dragonflight: with
+    -- UIDropDownMenuTemplate, goldDropdown is just the anchor frame and stays
+    -- shown forever -- the menu itself is DropDownList1. So on those clients the
+    -- overlay could get stuck covering the whole screen, swallowing every click
+    -- in the game with no error to show for it.
+    --
+    -- Watch the real menu frame instead, and only show the overlay if we have a
+    -- dependable way to take it down again.
+    local menu = _G.DropDownList1
+    if menu then
+        if not menu._gudaClickAwayHooked then
+            menu._gudaClickAwayHooked = true
+            menu:HookScript("OnHide", function() clickAwayOverlay:Hide() end)
+        end
+        clickAwayOverlay:Show()
+        clickAwayOverlay:SetFrameLevel(goldDropdown:GetFrameLevel() - 1)
+    end
 end
 
 local moneyFrameCount = 0

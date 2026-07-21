@@ -44,6 +44,45 @@ local _CreateFrame = CreateFrame
 local GetTime = GetTime
 
 -------------------------------------------------------------------------
+-- 0b. Probe container -- EVERY throwaway frame this file creates lives here
+-------------------------------------------------------------------------
+-- This shim answers "does the client have X?" by trying to create X. Those
+-- probe frames are never meant to be seen, but two of them used to be parented
+-- to UIParent and never hidden, because `pcall(_CreateFrame, ...)` was used
+-- purely for its boolean and the frame it returned was dropped on the floor.
+--
+-- One of those was `CreateFrame("Button", nil, UIParent, "NineSlicePanelTemplate")`.
+-- A NineSlice panel anchors to fill its parent, so on UIParent it became a
+-- FULL-SCREEN frame -- and buttons are mouse-enabled by default. The result was
+-- an invisible, screen-sized click sponge: no targeting, no camera, no action
+-- bars, and no Lua error to explain any of it.
+--
+-- Parenting probes to a HIDDEN frame fixes the whole class: a child of a hidden
+-- frame can never render or take input no matter what its template anchors to.
+-- Hiding each probe individually is not enough, because the actual defect was
+-- probes that were never captured in order to be hidden.
+local PROBE_PARENT = _CreateFrame("Frame", "GudaBagsShimProbeContainer", UIParent)
+PROBE_PARENT:SetWidth(1)
+PROBE_PARENT:SetHeight(1)
+PROBE_PARENT:SetPoint("TOPLEFT", UIParent, "TOPLEFT", 0, 0)
+PROBE_PARENT:EnableMouse(false)
+PROBE_PARENT:Hide()
+
+--- Create a throwaway probe frame: parked, hidden, mouse-disabled, and tagged so
+--- diagnostics can attribute it to us. Returns nil if the type/template is
+--- unsupported, which is exactly the capability answer callers want.
+local function CreateProbe(frameType, template)
+    local ok, frame = pcall(_CreateFrame, frameType, nil, PROBE_PARENT, template)
+    if not ok or not frame then return nil end
+    if frame.Hide then frame:Hide() end
+    if frame.EnableMouse then frame:EnableMouse(false) end
+    -- Without this the frame reports tagged=false in /gbdiag, identical to a
+    -- foreign frame -- which cost several rounds of misattribution.
+    frame._gbCreatedBy = "Shim335 probe (" .. tostring(template or frameType) .. ")"
+    return frame
+end
+
+-------------------------------------------------------------------------
 -- 1. C_Timer  (WoD 6.0) -- OnUpdate-driven scheduler
 -------------------------------------------------------------------------
 if type(C_Timer) == "table" and type(C_Timer.After) == "function" then
@@ -201,7 +240,9 @@ end
 -------------------------------------------------------------------------
 do
     local usesBackdropTemplate = false
-    local hasButtonFrameTemplate = pcall(_CreateFrame, "Frame", nil, UIParent, "ButtonFrameTemplate")
+    -- Was: pcall(_CreateFrame, "Frame", nil, UIParent, "ButtonFrameTemplate"),
+    -- which leaked a shown ~338x424 panel onto UIParent on every login.
+    local hasButtonFrameTemplate = CreateProbe("Frame", "ButtonFrameTemplate") ~= nil
 
     -- Give a plain frame the handful of ButtonFrameTemplate members the addon
     -- actually touches: CloseButton, Inset, TitleText, Bg, TitleBg. Everything
@@ -273,8 +314,14 @@ do
         BankPanelPurchaseButtonScriptTemplate = false,
     }
     do
+        -- THE BUG THAT BROKE THE MOUSE. This used to be
+        --     pcall(_CreateFrame, "Button", nil, UIParent, name)
+        -- using only the boolean and discarding the frame. For
+        -- NineSlicePanelTemplate -- which this client HAS -- that produced a
+        -- Button anchored to fill UIParent, mouse-enabled by default, shown
+        -- forever: an invisible full-screen click sponge with no error to trace.
         local function templateExists(name)
-            return (pcall(_CreateFrame, "Button", nil, UIParent, name))
+            return CreateProbe("Button", name) ~= nil
         end
         -- Always substituted regardless of whether the client has them:
         --  * BackdropTemplate  -- WotLK frames have SetBackdrop natively.
@@ -327,6 +374,20 @@ do
         if needsButtonFrame then
             buildButtonFrameSubstitute(frame, name)
         end
+
+        -- Record WHERE a top-level frame came from.
+        --
+        -- A shown, mouse-enabled frame parented directly to UIParent can swallow
+        -- every click in the game while producing no error, no log line and no
+        -- visible artifact. If it is also unnamed there is nothing to grep for,
+        -- which has cost several debugging rounds. Frames parented to UIParent
+        -- are rare, so capturing one stack line each is cheap, and it turns
+        -- "some anonymous Button" into a file and line number.
+        if parent == UIParent and frame and debugstack then
+            local ok, stack = pcall(debugstack, 2, 2, 0)
+            if ok then frame._gbCreatedBy = stack end
+        end
+
         return frame
     end
 
@@ -709,7 +770,8 @@ local widgetPolyfillOK, widgetPolyfillErr = pcall(function()
     local WHITE = "Interface\\Buttons\\WHITE8x8"
 
     -- Every widget class has its own metatable; grab each from a throwaway object.
-    local probeFrame = _CreateFrame("Frame", nil, UIParent)
+    -- All of these are parked under PROBE_PARENT (hidden), never UIParent.
+    local probeFrame = CreateProbe("Frame")
     local metas = {}
     local function addMeta(key, obj)
         if not obj then return end
@@ -718,23 +780,19 @@ local widgetPolyfillOK, widgetPolyfillErr = pcall(function()
     end
     -- Each creation is individually guarded: an unsupported widget type on this
     -- client should cost us that one metatable, not the whole section.
-    local function tryCreate(...)
-        local ok, obj = pcall(_CreateFrame, ...)
-        return ok and obj or nil
-    end
     addMeta("Texture",     probeFrame:CreateTexture())
     addMeta("FontString",  probeFrame:CreateFontString(nil, "ARTWORK", "GameFontNormal"))
     addMeta("Frame",       probeFrame)
-    addMeta("Button",      tryCreate("Button", nil, UIParent))
-    addMeta("Cooldown",    tryCreate("Cooldown", nil, UIParent))
+    addMeta("Button",      CreateProbe("Button"))
+    addMeta("Cooldown",    CreateProbe("Cooldown"))
     -- These carry their own metatables on some clients, and the addon applies
     -- backdrops to all of them -- the SetBackdropColor crash guard below has to
     -- reach every one.
-    addMeta("CheckButton", tryCreate("CheckButton", nil, UIParent))
-    addMeta("Slider",      tryCreate("Slider", nil, UIParent))
-    addMeta("ScrollFrame", tryCreate("ScrollFrame", nil, UIParent))
-    addMeta("EditBox",     tryCreate("EditBox", nil, UIParent))
-    addMeta("StatusBar",   tryCreate("StatusBar", nil, UIParent))
+    addMeta("CheckButton", CreateProbe("CheckButton"))
+    addMeta("Slider",      CreateProbe("Slider"))
+    addMeta("ScrollFrame", CreateProbe("ScrollFrame"))
+    addMeta("EditBox",     CreateProbe("EditBox"))
+    addMeta("StatusBar",   CreateProbe("StatusBar"))
 
     -- Apply `fn` as `name` on each listed metatable that lacks it.
     local function polyfillMethod(classes, name, fn)
@@ -816,7 +874,7 @@ local widgetPolyfillOK, widgetPolyfillErr = pcall(function()
     -- silently falls back to its default. Net effect: unticking any checkbox in
     -- the options UI appeared to do nothing at all.
     do
-        local checkButton = _CreateFrame("CheckButton", nil, UIParent)
+        local checkButton = CreateProbe("CheckButton")
         local mt = getmetatable(checkButton)
         local index = mt and type(mt.__index) == "table" and mt.__index or nil
         if index and type(index.GetChecked) == "function" then
@@ -836,7 +894,7 @@ local widgetPolyfillOK, widgetPolyfillErr = pcall(function()
     -- control in the General settings tab -- so a nil here aborted the entire
     -- settings build and left the popup with tabs but no content.
     do
-        local slider = _CreateFrame("Slider", nil, UIParent)
+        local slider = CreateProbe("Slider")
         local mt = getmetatable(slider)
         local index = mt and type(mt.__index) == "table" and mt.__index or nil
         if not index then
