@@ -1091,6 +1091,30 @@ if type(GetTimePreciseSec) ~= "function" then
     GetTimePreciseSec = GetTime
 end
 
+-- MuteSoundFile / UnmuteSoundFile (Legion 7.x). No pre-Legion equivalent.
+--
+-- These are why sorting only ever moved ONE item. Sorting\SortEngine.lua mutes
+-- pickup sounds after its first successful move:
+--     if not soundsMuted then MutePickupSounds(); soundsMuted = true end
+-- With MuteSoundFile nil that raised inside the sort coroutine, so the driver
+-- aborted the pass and called FinishSort("Sort error: ...") -- and FinishSort
+-- itself calls UnmutePickupSounds() at its line 1392, which raised AGAIN on
+-- UnmuteSoundFile and killed FinishSort before its ns:Print(message) on 1396.
+-- Hence one item moved, no error text in chat, and a half-reset sort state
+-- (ClearCache and the ITEM_LOCK_CHANGED unregister were skipped too).
+--
+-- Muting is purely cosmetic -- it suppresses the item pickup sound during a
+-- sort. No-ops restore the whole sort path; the only consequence on this client
+-- is that sorting is audible.
+if type(MuteSoundFile) ~= "function" then
+    markPolyfilled("MuteSoundFile")
+    function MuteSoundFile() end
+end
+if type(UnmuteSoundFile) ~= "function" then
+    markPolyfilled("UnmuteSoundFile")
+    function UnmuteSoundFile() end
+end
+
 -- GetMaxPlayerLevel (Cataclysm 4.0). WotLK exposes the cap as a global constant.
 -- Ascension may raise or lower it, so read the constant rather than hardcoding 80.
 if type(GetMaxPlayerLevel) ~= "function" then

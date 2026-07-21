@@ -93,13 +93,26 @@ local perfStats = {
 }
 
 -- Use pickup sound IDs from Constants
+--
+-- MuteSoundFile/UnmuteSoundFile are Legion 7.x. On 3.3.5a there is no
+-- equivalent, so muting is skipped entirely -- sorting is simply audible.
+-- These MUST be guarded here and not only polyfilled: an error raised in
+-- UnmutePickupSounds kills FinishSort before it prints its result message,
+-- which turns a failed sort into a silent one-item no-op.
+-- Both must exist, or we do not mute at all: muting with no way to unmute
+-- would silence pickup sounds permanently for the rest of the session.
+local canMuteSounds = type(MuteSoundFile) == "function"
+                  and type(UnmuteSoundFile) == "function"
+
 local function MutePickupSounds()
+    if not canMuteSounds then return end
     for _, soundID in ipairs(Constants.PICKUP_SOUND_IDS) do
         MuteSoundFile(soundID)
     end
 end
 
 local function UnmutePickupSounds()
+    if not canMuteSounds then return end
     for _, soundID in ipairs(Constants.PICKUP_SOUND_IDS) do
         UnmuteSoundFile(soundID)
     end
