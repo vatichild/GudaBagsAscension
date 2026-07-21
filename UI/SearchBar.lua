@@ -120,6 +120,50 @@ local function CreateSearchOverlay()
 end
 
 -------------------------------------------------
+-- Click-away without a full-screen overlay
+-------------------------------------------------
+-- The overlay above cannot be used pre-10.x: without SetPropagateMouseClicks a
+-- screen-sized mouse-enabled frame swallows every click in the game. Rather than
+-- lose click-to-dismiss entirely, get the same behaviour from events.
+--
+-- Purely event-driven -- no OnUpdate polling, per docs\RULES.md rule 2.
+
+local function ClearAllSearchFocus()
+    for _, instance in pairs(instances) do
+        local box = instance.searchBox
+        -- HasFocus() keeps this free on the overwhelmingly common path: these
+        -- hooks fire on every world click.
+        if box and box.HasFocus and box:HasFocus() then
+            box:ClearFocus()
+        end
+    end
+end
+
+local worldClickAwayHooked = false
+
+--- Dismiss search focus on a click outside the box.
+--- Two sources cover the realistic cases:
+---   * WorldFrame  -- clicking the 3D world, i.e. "click away" proper.
+---   * the owning GudaBags frame -- clicking its background. Clicks that land on
+---     a child (item button, control) are consumed by that child and correctly
+---     do NOT dismiss, which matches how the overlay behaved.
+--- HookScript is additive, so nothing existing is displaced and no input is
+--- intercepted -- the click still reaches whatever it was aimed at.
+local function InstallLegacyClickAway(parent)
+    if searchOverlay then return end   -- real overlay is in use; nothing to do
+
+    if not worldClickAwayHooked and WorldFrame and WorldFrame.HookScript then
+        worldClickAwayHooked = true
+        WorldFrame:HookScript("OnMouseDown", ClearAllSearchFocus)
+    end
+
+    if parent and parent.HookScript and not parent._gbSearchClickAway then
+        parent._gbSearchClickAway = true
+        parent:HookScript("OnMouseDown", ClearAllSearchFocus)
+    end
+end
+
+-------------------------------------------------
 -- Filter State (per instance)
 -------------------------------------------------
 local function CreateFilterState()
@@ -1236,6 +1280,8 @@ local function CreateSearchBar(parent)
     searchBox:HookScript("OnEditFocusGained", function()
         if searchOverlay then searchOverlay:Show() end
     end)
+    -- No overlay on this client, so wire up the event-driven equivalent instead.
+    InstallLegacyClickAway(parent)
 
     searchBox:HookScript("OnEditFocusLost", function(self)
         if searchOverlay then searchOverlay:Hide() end
