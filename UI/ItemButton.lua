@@ -656,6 +656,13 @@ local function CreateButton(parent)
     -- Disable any mouse blocking on the icon texture layer
     if button.icon then button.icon:SetDrawLayer("ARTWORK", 0) end
 
+    -- The pre-10.0 ItemButtonTemplate leaves $parentCount on ARTWORK sublevel 0
+    -- -- the exact layer the line above just moved the icon to. Same layer, same
+    -- sublevel means the stack count renders underneath the item icon and is
+    -- simply invisible, with no error to show for it. Lift it onto OVERLAY,
+    -- above both the icon and the junk/unusable washes (sublevels 1-5 here).
+    if button.Count then button.Count:SetDrawLayer("OVERLAY", 6) end
+
     -- Ensure the button is the topmost interactive element
     button:SetFrameLevel(button:GetParent():GetFrameLevel() + Constants.FRAME_LEVELS.BUTTON)
 
