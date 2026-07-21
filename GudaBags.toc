@@ -1,0 +1,157 @@
+## Interface: 30300
+## Title: GudaBags
+## Notes: Clean, unified bag management for all WoW versions
+## Author: Vati
+## Version: 2.0.4-wrath
+## SavedVariables: GudaBags_DB, GudaBagsShim_DB, GudaBags_Errors, GudaBags_Diag
+## SavedVariablesPerCharacter: GudaBags_CharDB
+## IconTexture: Interface\AddOns\GudaBags\Assets\bags.tga
+## OptionalDeps: Masque
+
+## Category: Guda
+
+# 3.3.5a compatibility shim -- MUST load before everything else.
+# Polyfills modern APIs (C_Timer, C_Container, C_Item, CreateObjectPool, Mixin, ...)
+# onto WotLK globals so the rest of the addon runs unmodified.
+Compatibility\Shim335.lua
+
+# Error capture -- loads right after the shim so it sees every later file's errors.
+Compatibility\ErrorSink.lua
+
+# Localization (load first)
+Locales.lua
+Core\Locales.lua
+
+# Note: Bindings.xml is auto-detected by WoW, do not list here
+
+# Core modules (load order matters)
+Core\Init.lua
+Core\Profiler.lua
+Core\PublicAPI.lua
+Core\Expansion.lua
+Core\Constants.lua
+Core\Utils.lua
+Core\Events.lua
+Core\Database.lua
+Core\Font.lua
+Core\ProfileManager.lua
+Core\Theme.lua
+Core\Masque.lua
+Core\Bindings.lua
+Core\SlashCommands.lua
+
+# Compatibility Layer
+Compatibility\API.lua
+Compatibility\Features.lua
+Compatibility\Pawn.lua
+
+# Category System
+DB\DefaultCategories.lua
+Core\TooltipScanner.lua
+Core\RuleEngine.lua
+Core\Rules\ItemTypeRule.lua
+Core\Rules\ItemIDRule.lua
+Core\Rules\QualityRule.lua
+Core\Rules\TooltipRule.lua
+Core\Rules\PatternRule.lua
+Core\Rules\BooleanRule.lua
+Core\Rules\RecentRule.lua
+Core\CategoryManager.lua
+Core\CategoryService.lua
+Core\SearchParser.lua
+
+# Config
+Config\SettingsSchema.lua
+
+# Data modules
+Data\ItemScanner.lua
+Data\ScannerBase.lua
+Data\BagScanner.lua
+Data\BankScanner.lua
+Data\EquipmentSets.lua
+Data\RetailBankScanner.lua
+Data\CurrencyScanner.lua
+
+# Sorting
+Sorting\SortEngine.lua
+
+# UI Controls
+UI\Controls\Slider.lua
+UI\Controls\Checkbox.lua
+UI\Controls\ToggleButton.lua
+UI\Controls\Select.lua
+
+# UI Components (Reusable)
+UI\Components\DragDropManager.lua
+UI\Components\CategoryDropIndicator.lua
+UI\Components\DragFlyoutBar.lua
+
+# UI Layout
+UI\Layout\VerticalStack.lua
+UI\Layout\HorizontalRow.lua
+
+# UI Components
+UI\TabPanel.lua
+UI\IconButton.lua
+UI\Tooltip.lua
+UI\CategoryHeaderPool.lua
+UI\ItemButton.lua
+UI\CharacterDropdown.lua
+
+# Header Components
+UI\Header\Characters.lua
+
+# Footer Components
+UI\Footer\BagSlots.lua
+UI\Footer\Keyring.lua
+UI\Footer\SoulBag.lua
+UI\Footer\QuiverBag.lua
+UI\Footer\Money.lua
+UI\Footer\Currency.lua
+UI\Footer.lua
+UI\Footer\ProfessionButton.lua
+UI\Footer\Disenchant.lua
+UI\Footer\Lockpick.lua
+UI\Footer\Prospecting.lua
+UI\SearchBar.lua
+UI\Components\SearchBarToggle.lua
+UI\Components\SearchToggleButton.lua
+UI\Components\HeaderButtonVisibility.lua
+UI\Components\HeaderViewControls.lua
+UI\Header.lua
+UI\SettingsPopup.lua
+UI\CategoryEditor.lua
+UI\ProfilesTab.lua
+
+# BagFrame Components
+UI\BagFrame\BagClassifier.lua
+UI\BagFrame\LayoutEngine.lua
+UI\BagFrame.lua
+
+# BankFrame Components
+UI\BankFrame\BankCharacters.lua
+UI\BankFrame\BankHeader.lua
+UI\BankFrame\BankFooter.lua
+UI\BankFrame.lua
+
+# GuildBankFrame Components
+Data\GuildBankScanner.lua
+UI\GuildBankFrame\GuildBankHeader.lua
+UI\GuildBankFrame\GuildBankFooter.lua
+UI\GuildBankFrame.lua
+
+# MailFrame Components
+Data\MailScanner.lua
+UI\MailFrame\MailCharacters.lua
+UI\MailFrame\MailHeader.lua
+UI\MailFrame\MailFooter.lua
+UI\MailFrame.lua
+
+# Tracked Item Bar
+UI\TrackedBar.lua
+
+# Quest Item Bar
+UI\QuestBar.lua
+
+# Port diagnostics (/gbdiag). Loads LAST so every module it inspects exists.
+Compatibility\Diagnostics.lua

@@ -1,0 +1,6 @@
+.idea
+docs
+tmp
+.*
+!.gitignore
+nul

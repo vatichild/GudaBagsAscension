@@ -1,0 +1,44 @@
+<Bindings>
+	<Binding name="GUDABAGS_TOGGLE" category="GudaBags">
+		GudaBags_Toggle()
+	</Binding>
+	<Binding name="GUDABAGS_TOGGLE_BANK" category="GudaBags">
+		GudaBags_ToggleBank()
+	</Binding>
+	<Binding name="CLICK GudaQuestBarMainButton:RightButton" category="GudaBags">
+	</Binding>
+	<Binding name="CLICK GudaQuestBarGridItem1:LeftButton" category="GudaBags">
+	</Binding>
+	<Binding name="CLICK GudaQuestBarGridItem2:LeftButton" category="GudaBags">
+	</Binding>
+	<Binding name="CLICK GudaQuestBarGridItem3:LeftButton" category="GudaBags">
+	</Binding>
+	<Binding name="CLICK GudaQuestBarGridItem4:LeftButton" category="GudaBags">
+	</Binding>
+	<Binding name="CLICK GudaQuestBarGridItem5:LeftButton" category="GudaBags">
+	</Binding>
+	<Binding name="CLICK GudaTrackedItem1:RightButton" category="GudaBags">
+	</Binding>
+	<Binding name="CLICK GudaTrackedItem2:RightButton" category="GudaBags">
+	</Binding>
+	<Binding name="CLICK GudaTrackedItem3:RightButton" category="GudaBags">
+	</Binding>
+	<Binding name="CLICK GudaTrackedItem4:RightButton" category="GudaBags">
+	</Binding>
+	<Binding name="CLICK GudaTrackedItem5:RightButton" category="GudaBags">
+	</Binding>
+	<Binding name="CLICK GudaTrackedItem6:RightButton" category="GudaBags">
+	</Binding>
+	<Binding name="CLICK GudaTrackedItem7:RightButton" category="GudaBags">
+	</Binding>
+	<Binding name="CLICK GudaTrackedItem8:RightButton" category="GudaBags">
+	</Binding>
+	<Binding name="CLICK GudaTrackedItem9:RightButton" category="GudaBags">
+	</Binding>
+	<Binding name="CLICK GudaTrackedItem10:RightButton" category="GudaBags">
+	</Binding>
+	<Binding name="CLICK GudaTrackedItem11:RightButton" category="GudaBags">
+	</Binding>
+	<Binding name="CLICK GudaTrackedItem12:RightButton" category="GudaBags">
+	</Binding>
+</Bindings>

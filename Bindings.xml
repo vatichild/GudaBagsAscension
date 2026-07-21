@@ -1,0 +1,41 @@
+<Bindings>
+	<!--
+		3.3.5a NOTE: the binding schema here accepts only name, header and
+		runOnUp. The "category" attribute used by the retail version of this
+		file is a Legion era addition, and an unknown attribute fails the XML
+		parse. A failed Bindings.xml takes the ENTIRE keybinding system down
+		with it: no Escape, no Enter, no chat, while the mouse keeps working.
+		Use "header" plus the matching BINDING_HEADER_ global in
+		Core\Bindings.lua. Note also that an XML comment may never contain a
+		double hyphen, which is its own way to break this same file.
+	-->
+	<!--
+		The header goes on the FIRST binding of the group ONLY. Repeating it
+		raises "Binding header GUDABAGS is defined more than once", which fails
+		the binding load just as fatally as a bad attribute does.
+	-->
+	<Binding name="GUDABAGS_TOGGLE" header="GUDABAGS">
+		GudaBags_Toggle()
+	</Binding>
+	<Binding name="GUDABAGS_TOGGLE_BANK">
+		GudaBags_ToggleBank()
+	</Binding>
+	<Binding name="CLICK GudaQuestBarMainButton:RightButton" />
+	<Binding name="CLICK GudaQuestBarGridItem1:LeftButton" />
+	<Binding name="CLICK GudaQuestBarGridItem2:LeftButton" />
+	<Binding name="CLICK GudaQuestBarGridItem3:LeftButton" />
+	<Binding name="CLICK GudaQuestBarGridItem4:LeftButton" />
+	<Binding name="CLICK GudaQuestBarGridItem5:LeftButton" />
+	<Binding name="CLICK GudaTrackedItem1:RightButton" />
+	<Binding name="CLICK GudaTrackedItem2:RightButton" />
+	<Binding name="CLICK GudaTrackedItem3:RightButton" />
+	<Binding name="CLICK GudaTrackedItem4:RightButton" />
+	<Binding name="CLICK GudaTrackedItem5:RightButton" />
+	<Binding name="CLICK GudaTrackedItem6:RightButton" />
+	<Binding name="CLICK GudaTrackedItem7:RightButton" />
+	<Binding name="CLICK GudaTrackedItem8:RightButton" />
+	<Binding name="CLICK GudaTrackedItem9:RightButton" />
+	<Binding name="CLICK GudaTrackedItem10:RightButton" />
+	<Binding name="CLICK GudaTrackedItem11:RightButton" />
+	<Binding name="CLICK GudaTrackedItem12:RightButton" />
+</Bindings>
