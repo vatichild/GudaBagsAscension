@@ -145,6 +145,73 @@ local function UpdateSpellOverlay(button)
     end
 end
 
+-- Shared hover driver.
+--
+-- This replaces a per-button OnUpdate. That handler did nothing at all unless
+-- its button was under the mouse -- but every visible button still paid the
+-- Lua call plus an IsMouseOver C call every frame, and ~200 buttons are
+-- PreWarmed (Rule 3). On 3.3.5a that is a real cost, and it is worst while
+-- dragging the bag/bank window, when the client is simultaneously re-anchoring
+-- every child frame.
+--
+-- Only one button can be hovered at a time, so OnEnter parks it here and
+-- OnLeave clears it. Rule 2: zero polling when nothing is hovered, one handler
+-- rather than N when something is.
+local StartHoverTracking, StopHoverTracking
+do
+    local hoverDriver = CreateFrame("Frame")
+    hoverDriver:Hide()
+    local hovered
+
+    hoverDriver:SetScript("OnUpdate", function(self)
+        local button = hovered
+        -- Self-heal: the button can be hidden or released out from under us
+        -- (a refresh during hover) without OnLeave ever firing.
+        if not button or not button:IsShown() or not button:IsMouseOver() then
+            hovered = nil
+            self:Hide()
+            return
+        end
+
+        -- Track shift key state for tooltip refresh
+        local shiftDown = IsShiftKeyDown()
+        if button.lastShiftState ~= shiftDown then
+            button.lastShiftState = shiftDown
+            -- Refresh tooltip when shift state changes (for stack price vs single price).
+            -- Replay OnEnter so the refresh uses the same path as the initial hover
+            -- (Blizzard-driven for live slots) instead of a second insecure SetBagItem,
+            -- which would re-taint GameTooltip's money frame. Skip with a held cursor
+            -- (see the OnUpdate replay note below re: CursorUpdate desaturation).
+            if button.itemData and not button.isEmptySlotButton and not button.isDropTargetButton
+                and not button.itemData.isEmptySlots and not GetCursorInfo() then
+                local onEnter = button:GetScript("OnEnter")
+                if onEnter then onEnter(button) end
+            end
+        end
+
+        -- Update drag-drop indicator position
+        if button.categoryId and button.containerFrame then
+            local CategoryDropIndicator = ns:GetModule("CategoryDropIndicator")
+            if CategoryDropIndicator and CategoryDropIndicator:IsShown() then
+                CategoryDropIndicator:OnItemButtonUpdate(button)
+            end
+        end
+    end)
+
+    function StartHoverTracking(button)
+        hovered = button
+        button.lastShiftState = IsShiftKeyDown()
+        hoverDriver:Show()
+    end
+
+    function StopHoverTracking(button)
+        if hovered == button then
+            hovered = nil
+            hoverDriver:Hide()
+        end
+    end
+end
+
 do
     local spellGuardFrame = CreateFrame("Frame")
     spellGuardFrame:Hide()
@@ -1069,35 +1136,12 @@ local function CreateButton(parent)
         end
     end)
 
-    -- Update indicator position while hovering with dragged item
-    -- Also refresh tooltip when shift key state changes (for price display)
-    button:SetScript("OnUpdate", function(self)
-        -- Track shift key state for tooltip refresh
-        if self:IsMouseOver() then
-            local shiftDown = IsShiftKeyDown()
-            if self.lastShiftState ~= shiftDown then
-                self.lastShiftState = shiftDown
-                -- Refresh tooltip when shift state changes (for stack price vs single price).
-                -- Replay OnEnter so the refresh uses the same path as the initial hover
-                -- (Blizzard-driven for live slots) instead of a second insecure SetBagItem,
-                -- which would re-taint GameTooltip's money frame. Skip with a held cursor
-                -- (see the OnUpdate replay note below re: CursorUpdate desaturation).
-                if self.itemData and not self.isEmptySlotButton and not self.isDropTargetButton
-                    and not self.itemData.isEmptySlots and not GetCursorInfo() then
-                    local onEnter = self:GetScript("OnEnter")
-                    if onEnter then onEnter(self) end
-                end
-            end
-        end
-
-        -- Update drag-drop indicator position
-        if self.categoryId and self.containerFrame and self:IsMouseOver() then
-            local CategoryDropIndicator = ns:GetModule("CategoryDropIndicator")
-            if CategoryDropIndicator and CategoryDropIndicator:IsShown() then
-                CategoryDropIndicator:OnItemButtonUpdate(self)
-            end
-        end
-    end)
+    -- Update indicator position while hovering with dragged item, and refresh
+    -- the tooltip when shift is pressed (for price display). Hooked rather than
+    -- driven per button -- see StartHoverTracking above. HookScript leaves the
+    -- existing OnEnter/OnLeave bodies untouched.
+    button:HookScript("OnEnter", StartHoverTracking)
+    button:HookScript("OnLeave", StopHoverTracking)
 
     -- Disable template's tooltip update mechanism
     button.UpdateTooltip = nil

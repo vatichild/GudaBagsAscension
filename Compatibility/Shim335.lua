@@ -85,15 +85,24 @@ end
 -------------------------------------------------------------------------
 -- 1. C_Timer  (WoD 6.0) -- OnUpdate-driven scheduler
 -------------------------------------------------------------------------
+-- Filled member by member, NOT all-or-nothing. This used to skip the whole
+-- block when C_Timer.After existed, which left NewTicker/NewTimer nil on any
+-- client that backported only part of the namespace -- and Ascension's C_Timer
+-- is exactly that kind of partial table. Anything calling the missing member
+-- then died at the call site, far from here.
 if type(C_Timer) == "table" and type(C_Timer.After) == "function" then
     markNative("C_Timer")
-else
+end
+do
     C_Timer = C_Timer or {}
-    markPolyfilled("C_Timer")
     local timers = {}
     local driver = _CreateFrame("Frame")
-    driver:SetScript("OnUpdate", function()
-        if #timers == 0 then return end
+    -- Parked until something is actually scheduled, and re-parked when the
+    -- queue drains, so a client with a fully native C_Timer pays nothing and
+    -- an idle queue does not tick (Rule 2).
+    driver:Hide()
+    driver:SetScript("OnUpdate", function(self)
+        if #timers == 0 then self:Hide() return end
         local now = GetTime()
         for i = #timers, 1, -1 do
             local t = timers[i]
@@ -116,19 +125,28 @@ else
             end
         end
     end)
-    local function schedule(t) timers[#timers + 1] = t; return t end
+    local function schedule(t) timers[#timers + 1] = t; driver:Show(); return t end
     local function makeCancelable(t)
         t.Cancel = function(self) self.cancelled = true end
         t.IsCancelled = function(self) return self.cancelled == true end
         return t
     end
-    fill(C_Timer, "After", function(seconds, func)
+    -- Record each member we actually had to supply, so the report distinguishes
+    -- "C_Timer is native" from "C_Timer exists but was missing NewTicker".
+    local function fillTimer(key, fn)
+        if type(C_Timer[key]) ~= "function" then
+            markPolyfilled("C_Timer." .. key)
+        end
+        fill(C_Timer, key, fn)
+    end
+
+    fillTimer("After", function(seconds, func)
         schedule({ at = GetTime() + (seconds or 0), func = func })
     end)
-    fill(C_Timer, "NewTimer", function(seconds, func)
+    fillTimer("NewTimer", function(seconds, func)
         return makeCancelable(schedule({ at = GetTime() + (seconds or 0), func = func }))
     end)
-    fill(C_Timer, "NewTicker", function(seconds, func, iterations)
+    fillTimer("NewTicker", function(seconds, func, iterations)
         return makeCancelable(schedule({
             at = GetTime() + (seconds or 0), func = func, ticker = true,
             interval = seconds or 0, left = iterations,

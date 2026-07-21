@@ -305,6 +305,26 @@ local function CreateBagFrame()
     f:SetFrameLevel(Constants.FRAME_LEVELS.BASE)
     f:EnableMouse(true)
 
+    -- The drag flyout ("Track This Item", "Lock This Item", ...) is parented to
+    -- UIParent and anchored above this frame, so hiding the frame does not hide
+    -- it. BagFrame:Hide() cleans it up, but the frame can also be hidden without
+    -- going through that method -- Escape via UISpecialFrames, CloseAllWindows,
+    -- or any other addon calling frame:Hide() -- and then the bar was left
+    -- floating on screen with no owner. OnHide fires for every one of those
+    -- paths. The cleanup is idempotent, so the BagFrame:Hide() route running it
+    -- twice is harmless.
+    f:SetScript("OnHide", function()
+        isDraggingItem = false
+        if dragCheckTicker then
+            dragCheckTicker:Cancel()
+            dragCheckTicker = nil
+        end
+        local DragFlyoutBar = ns:GetModule("DragFlyoutBar")
+        if DragFlyoutBar then
+            DragFlyoutBar:OnDragEnd()
+        end
+    end)
+
     -- Raise frame above BankFrame when clicked
     f:SetScript("OnMouseDown", function(self)
         self:SetFrameLevel(Constants.FRAME_LEVELS.RAISED)

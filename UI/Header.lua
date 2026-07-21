@@ -25,6 +25,142 @@ local BankCharacters = nil
 local lastSortTime = 0
 local SORT_DEBOUNCE = 0.5  -- 500ms debounce
 
+-------------------------------------------------
+-- Drag proxy
+--
+-- Moving the real window means the client re-anchors its entire widget tree
+-- every frame -- ~200 item buttons (Rule 3 PreWarm) plus each button's
+-- textures. 3.3.5a does that badly enough to stutter the whole game.
+--
+-- So the real window never moves during a drag. It stays exactly where it is
+-- at alpha 0 while a single empty outline frame follows the cursor, and on
+-- release the window is repositioned once to wherever the outline ended up.
+-- One frame moving instead of thousands of regions.
+--
+-- Alpha rather than Hide, deliberately:
+--   * a hidden frame receives no mouse events, so OnDragStop -- which lives on
+--     the (now hidden) title bar -- would never fire and the window would be
+--     stranded invisible;
+--   * hiding the container would be a protected action while its secure item
+--     buttons are shown, so it would break during combat (Rule 3).
+-- SetAlpha is neither.
+-------------------------------------------------
+local dragProxy = nil
+local dragOwner = nil
+local dragFaded = {}   -- frame -> alpha to restore. Reused, never reallocated.
+
+local function IsDescendantOf(frame, ancestor)
+    local p = frame
+    while p do
+        if p == ancestor then return true end
+        p = p.GetParent and p:GetParent() or nil
+    end
+    return false
+end
+
+-- Frames that move with the window but are NOT its children, so SetAlpha on
+-- the window does not reach them.
+--
+-- The bag frame's item buttons live in a top-level secureButtonContainer that
+-- is only ANCHORED to the window (see BagFrame.lua -- it is kept off the
+-- window's child tree so the window stays unprotected and can be shown in
+-- combat). Fading only the window therefore left every item button on screen,
+-- parked at the old position until release.
+local function FadeForDrag(owner)
+    dragFaded[owner] = owner:GetAlpha()
+    owner:SetAlpha(0)
+
+    local container = owner.container
+    if container and container.SetAlpha and not IsDescendantOf(container, owner) then
+        dragFaded[container] = container:GetAlpha()
+        container:SetAlpha(0)
+    end
+end
+
+local function UnfadeAfterDrag()
+    for frame, alpha in pairs(dragFaded) do
+        frame:SetAlpha(alpha or 1)
+        dragFaded[frame] = nil
+    end
+end
+
+local function GetDragProxy()
+    if dragProxy then return dragProxy end
+
+    local p = CreateFrame("Frame", "GudaBagsDragProxy", UIParent, "BackdropTemplate")
+    p:SetMovable(true)
+    p:SetClampedToScreen(true)
+    p:EnableMouse(false)   -- must not swallow the mouse-up that ends the drag
+    p:SetFrameStrata("TOOLTIP")
+    p:Hide()
+
+    p:SetBackdrop({
+        bgFile = "Interface\\Buttons\\WHITE8x8",
+        edgeFile = "Interface\\Tooltips\\UI-Tooltip-Border",
+        edgeSize = 12,
+        insets = { left = 3, right = 3, top = 3, bottom = 3 },
+    })
+    p:SetBackdropColor(0, 0, 0, 0.25)
+    p:SetBackdropBorderColor(1, 0.82, 0, 0.9)
+
+    dragProxy = p
+    return p
+end
+
+-- Put the window back where the outline ended up and make it visible again.
+-- Safe to call when no drag is in progress.
+local function EndProxyDrag()
+    if not dragOwner then return end
+
+    local owner = dragOwner
+    dragOwner = nil
+
+    if dragProxy then
+        dragProxy:StopMovingOrSizing()
+        local left, bottom = dragProxy:GetLeft(), dragProxy:GetBottom()
+        if left and bottom then
+            owner:ClearAllPoints()
+            owner:SetPoint("BOTTOMLEFT", UIParent, "BOTTOMLEFT", left, bottom)
+        end
+        dragProxy:Hide()
+    end
+
+    UnfadeAfterDrag()
+end
+
+local function BeginProxyDrag(owner)
+    -- A previous drag that never got its mouse-up would otherwise leave the
+    -- window stuck at alpha 0.
+    EndProxyDrag()
+
+    local left, bottom = owner:GetLeft(), owner:GetBottom()
+    if not left or not bottom then return false end
+
+    local p = GetDragProxy()
+    p:SetSize(owner:GetWidth(), owner:GetHeight())
+    p:ClearAllPoints()
+    p:SetPoint("BOTTOMLEFT", UIParent, "BOTTOMLEFT", left, bottom)
+    p:Show()
+
+    dragOwner = owner
+    FadeForDrag(owner)
+
+    p:StartMoving()
+    return true
+end
+
+-- Exposed so a frame can bail out of a drag it is about to lose (e.g. hidden
+-- by Escape mid-drag) without stranding itself invisible.
+-- Only ends the drag if THIS frame owns it, so one window closing cannot
+-- reposition another that is mid-drag.
+local function CancelDragFor(owner)
+    if dragOwner == owner then EndProxyDrag() end
+end
+
+function Header:CancelDrag()
+    EndProxyDrag()
+end
+
 local function LoadComponents()
     Characters = ns:GetModule("Header.Characters")
     if Constants.FEATURES.BANK then
@@ -84,7 +220,12 @@ local function CreateHeader(parent)
 
     titleBar:SetScript("OnDragStart", function()
         if not Database:GetSetting("locked") then
-            parent:StartMoving()
+            -- Move an outline, not the window itself -- see the drag proxy note
+            -- above. Falls back to the native path if the window has no
+            -- resolved position yet (never anchored, so GetLeft is nil).
+            if not BeginProxyDrag(parent) then
+                parent:StartMoving()
+            end
             -- Public flag observed by satellite buttons (Disenchant, Pick Lock,
             -- Prospecting) so they can hide during the drag. Frame:IsMoving()
             -- is not available on all Classic clients.
@@ -100,11 +241,21 @@ local function CreateHeader(parent)
     end)
 
     titleBar:SetScript("OnDragStop", function()
+        -- StopMovingOrSizing is harmless when the native path was not used.
         parent:StopMovingOrSizing()
+        CancelDragFor(parent)
         parent._isDragging = nil
         if onDragStop then
             onDragStop()
         end
+    end)
+
+    -- Escape (UISpecialFrames), CloseAllWindows, or another addon can hide the
+    -- window mid-drag. OnDragStop never fires in that case, which would strand
+    -- it at alpha 0 -- invisible but still there. Restore it here instead.
+    parent:HookScript("OnHide", function(self)
+        CancelDragFor(self)
+        self._isDragging = nil
     end)
 
     -- Ensure container stays above frame backdrop when mouse enters header
