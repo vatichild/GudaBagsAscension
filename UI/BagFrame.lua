@@ -107,6 +107,37 @@ local pseudoItemButtons = {} -- Track Empty/Soul/DropTarget pseudo-item buttons 
 local isDraggingItem = false
 local dragCheckTicker = nil
 
+-- Single authoritative teardown for an item drag.
+--
+-- isDraggingItem drives BOTH the flyout bar and (via BuildCategorySections'
+-- showEmptyDropTargets argument) the empty-category drop-target sections. If it
+-- is left true, the flyout outlives the bags and every enabled-but-empty
+-- category stays on screen with a glowing drop slot in it.
+--
+-- The teardown used to be copy-pasted at three call sites (the cursor ticker,
+-- BagFrame:Hide, the frame's OnHide), which is how they drifted. One function,
+-- callable from anywhere, idempotent.
+local function EndItemDrag()
+    isDraggingItem = false
+    if dragCheckTicker then
+        dragCheckTicker:Cancel()
+        dragCheckTicker = nil
+    end
+    local DragFlyoutBar = ns:GetModule("DragFlyoutBar")
+    if DragFlyoutBar then
+        DragFlyoutBar:OnDragEnd()
+    end
+end
+
+-- Drop a drag whose end signal we missed. Cheap enough to call from the layout
+-- entry points, which already only run on bag events -- no new polling (Rule 2).
+local function HealStaleDragState()
+    if isDraggingItem and not CursorHasItem() then
+        ns:Debug("Stale drag state cleared (cursor is empty)")
+        EndItemDrag()
+    end
+end
+
 -- Helper to find a pseudo-item button by type (Empty or Soul)
 local function FindPseudoItemButton(pseudoType)
     local prefix = pseudoType .. ":"
@@ -313,17 +344,7 @@ local function CreateBagFrame()
     -- floating on screen with no owner. OnHide fires for every one of those
     -- paths. The cleanup is idempotent, so the BagFrame:Hide() route running it
     -- twice is harmless.
-    f:SetScript("OnHide", function()
-        isDraggingItem = false
-        if dragCheckTicker then
-            dragCheckTicker:Cancel()
-            dragCheckTicker = nil
-        end
-        local DragFlyoutBar = ns:GetModule("DragFlyoutBar")
-        if DragFlyoutBar then
-            DragFlyoutBar:OnDragEnd()
-        end
-    end)
+    f:SetScript("OnHide", EndItemDrag)
 
     -- Raise frame above BankFrame when clicked
     f:SetScript("OnMouseDown", function(self)
@@ -520,6 +541,9 @@ end
 
 function BagFrame:Refresh()
     if not frame then return end
+
+    -- Never lay out drop targets for a drag that already ended.
+    HealStaleDragState()
 
     ns:ProfileStart("Refresh")
 
@@ -1310,15 +1334,7 @@ function BagFrame:Hide()
     self:ResetSearchToggle()
 
     -- Cancel drag state tracking
-    isDraggingItem = false
-    if dragCheckTicker then
-        dragCheckTicker:Cancel()
-        dragCheckTicker = nil
-    end
-    local DragFlyoutBar = ns:GetModule("DragFlyoutBar")
-    if DragFlyoutBar then
-        DragFlyoutBar:OnDragEnd()
-    end
+    EndItemDrag()
 
     heldHidden = true
     if canHold then
@@ -1368,6 +1384,10 @@ function BagFrame:IncrementalUpdate(dirtyBags)
     -- Never do incremental updates while viewing a cached character
     -- Live bag events should not affect cached character display
     if viewingCharacter then return end
+
+    -- Same guard as Refresh: a missed drag-end costs one stale frame, not a
+    -- stuck UI.
+    HealStaleDragState()
 
     -- Recent items removal is now handled by ghost slots in incremental update
     -- Just clear the flag so it doesn't accumulate
@@ -2618,6 +2638,27 @@ Events:Register("ITEM_LOCK_CHANGED", function(event, bagID, slotID)
             if cursorType == "item" then
                 isDraggingItem = true
 
+                -- Install the teardown FIRST.
+                --
+                -- This ticker is the only thing that ends a drag. It used to be
+                -- created last, after the flyout and the category-view Refresh
+                -- below -- so if either of those raised, the callback aborted
+                -- with isDraggingItem already true and no ticker to ever clear
+                -- it. That is precisely why category view (which alone calls
+                -- Refresh here) got stuck while single view did not. A cosmetic
+                -- step must never be able to strand the state machine.
+                dragCheckTicker = C_Timer.NewTicker(0.1, function()
+                    if not CursorHasItem() then
+                        EndItemDrag()
+                        if frame and frame:IsShown() then
+                            local viewType = Database:GetSetting("bagViewType") or "single"
+                            if viewType == "category" then
+                                BagFrame:Refresh()
+                            end
+                        end
+                    end
+                end)
+
                 local sourceBag, sourceSlot, source = BagFrame:GetCursorBagSlot()
 
                 local DragFlyoutBar = ns:GetModule("DragFlyoutBar")
@@ -2629,27 +2670,6 @@ Events:Register("ITEM_LOCK_CHANGED", function(event, bagID, slotID)
                 if viewType == "category" then
                     BagFrame:Refresh()
                 end
-
-                -- Poll for cursor clear (item dropped/cancelled)
-                dragCheckTicker = C_Timer.NewTicker(0.1, function()
-                    if not CursorHasItem() then
-                        isDraggingItem = false
-                        if dragCheckTicker then
-                            dragCheckTicker:Cancel()
-                            dragCheckTicker = nil
-                        end
-                        local DragFlyoutBar = ns:GetModule("DragFlyoutBar")
-                        if DragFlyoutBar then
-                            DragFlyoutBar:OnDragEnd()
-                        end
-                        if frame and frame:IsShown() then
-                            local viewType = Database:GetSetting("bagViewType") or "single"
-                            if viewType == "category" then
-                                BagFrame:Refresh()
-                            end
-                        end
-                    end
-                end)
             end
         end)
     end

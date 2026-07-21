@@ -111,7 +111,19 @@ do
             elseif now >= t.at then
                 local ok, err = pcall(t.func, t)
                 if not ok then
-                    report.notes[#report.notes + 1] = "timer error: " .. tostring(err)
+                    -- This used to go ONLY into report.notes, which is not
+                    -- readable until the saved variable is written at logout.
+                    -- A timer callback failing 10x a second was therefore
+                    -- completely silent in game, and callbacks that set up
+                    -- state before failing left that state stranded. Route it
+                    -- to ErrorSink (deduped and rate-capped there) so /gberrors
+                    -- sees it; keep the note for failures raised before
+                    -- ErrorSink has loaded.
+                    if ns and ns.ErrorSink then
+                        ns.ErrorSink:Capture(err, "C_Timer callback")
+                    else
+                        report.notes[#report.notes + 1] = "timer error: " .. tostring(err)
+                    end
                 end
                 if t.ticker and not t.cancelled then
                     t.at = now + t.interval
