@@ -161,6 +161,18 @@ function Header:CancelDrag()
     EndProxyDrag()
 end
 
+-- Public form of the proxy drag, for windows that build their own title bar
+-- instead of using CreateHeader below (the bank -- see BankFrame/BankHeader).
+-- Returns false if the window has no resolved position yet, in which case the
+-- caller should fall back to the native StartMoving.
+function Header:BeginDrag(owner)
+    return BeginProxyDrag(owner)
+end
+
+function Header:EndDrag(owner)
+    CancelDragFor(owner)
+end
+
 local function LoadComponents()
     Characters = ns:GetModule("Header.Characters")
     if Constants.FEATURES.BANK then

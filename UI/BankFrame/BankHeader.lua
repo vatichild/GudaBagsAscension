@@ -56,17 +56,34 @@ local function CreateHeader(parent)
         end
     end)
 
+    -- The bank builds its own title bar rather than using UI/Header's
+    -- CreateHeader, so it has to opt into the drag proxy explicitly. Without
+    -- this it kept the native StartMoving path: the client re-anchors the whole
+    -- bank tree every frame, which is the stutter. See the drag proxy note in
+    -- UI/Header.lua.
     titleBar:SetScript("OnDragStart", function()
         if not Database:GetSetting("locked") then
-            parent:StartMoving()
+            local HeaderModule = ns:GetModule("Header")
+            if not (HeaderModule and HeaderModule:BeginDrag(parent)) then
+                parent:StartMoving()
+            end
         end
     end)
 
     titleBar:SetScript("OnDragStop", function()
         parent:StopMovingOrSizing()
+        local HeaderModule = ns:GetModule("Header")
+        if HeaderModule then HeaderModule:EndDrag(parent) end
         if onDragStop then
             onDragStop()
         end
+    end)
+
+    -- Escape / CloseAllWindows can hide the bank mid-drag, in which case
+    -- OnDragStop never fires and the window would be stranded at alpha 0.
+    parent:HookScript("OnHide", function(self)
+        local HeaderModule = ns:GetModule("Header")
+        if HeaderModule then HeaderModule:EndDrag(self) end
     end)
 
     local bgAlpha = Database:GetSetting("bgAlpha") / 100
