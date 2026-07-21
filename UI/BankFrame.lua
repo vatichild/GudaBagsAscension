@@ -41,6 +41,28 @@ local cachedItemCategory = {} -- Key: "bagID:slot" -> previous categoryId (for c
 -- The `false` sentinel lets reused-button refresh skip GetCharges for non-charge items.
 local cachedItemCharges = {} -- Key: "bagID:slot" -> previous charges value
 local layoutCached = false -- True when layout is cached and can do incremental updates
+
+-- Per-bag slot counts as of the currently cached layout. Same problem as the
+-- bag frame: putting a bag into a bank bag slot (or pulling one out) changes
+-- how many slots the grid must show, and the incremental paths can only
+-- repaint existing buttons or ghost them (Rule 1) -- never add or drop any.
+-- Buying a new bank slot has the same effect.
+local layoutBankSlots = {}
+
+-- Returns true when the bank bag layout differs from the cached one, resyncing
+-- the snapshot as it goes. Rule 2: fixed table, no allocation, only runs on a
+-- bank update batch.
+local function SyncBankSlotLayout()
+    local changed = false
+    for _, bagID in ipairs(Constants.BANK_BAG_IDS) do
+        local numSlots = C_Container.GetContainerNumSlots(bagID) or 0
+        if layoutBankSlots[bagID] ~= numSlots then
+            layoutBankSlots[bagID] = numSlots
+            changed = true
+        end
+    end
+    return changed
+end
 local lastLayoutSettings = nil  -- Delta tracking for layout recalculation
 
 -- In-place button reuse across a single/split refresh (tab switch, type switch).
@@ -2875,6 +2897,14 @@ function BankFrame:IncrementalUpdate(dirtyBags)
 
     if not layoutCached then
         -- No cached layout, do full refresh
+        self:Refresh()
+        return
+    end
+
+    -- A bank bag was added, removed, or a slot purchased: rebuild rather than
+    -- repaint, since the number of slots on screen has to change.
+    if SyncBankSlotLayout() then
+        ns:Debug("BankFrame IncrementalUpdate REFRESH: bank slot layout changed")
         self:Refresh()
         return
     end

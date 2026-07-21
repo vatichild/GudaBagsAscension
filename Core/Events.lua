@@ -6,7 +6,25 @@ ns:RegisterModule("Events", Events)
 local callbacks = {}
 local eventFrame = CreateFrame("Frame")
 
+-- Events this client does not have, mapped to the closest one it does. When
+-- Register fails on the modern name we register the fallback instead and
+-- dispatch it to the callbacks filed under the original name, so no module
+-- needs to know which flavour it is running on.
+--
+-- PLAYER_EQUIPMENT_CHANGED is Cataclysm 4.0. On 3.3.5a the equivalent signal
+-- is UNIT_INVENTORY_CHANGED -- and bag slots ARE inventory slots, so this is
+-- what fires when a bag is equipped or removed. Its payload differs
+-- (unit vs slot/hasCurrent) but every handler here ignores the arguments.
+local EVENT_FALLBACKS = {
+    PLAYER_EQUIPMENT_CHANGED = "UNIT_INVENTORY_CHANGED",
+}
+
+-- fallback event name -> logical event name the callbacks are filed under
+local fallbackOf = {}
+
 local function OnEvent(self, event, ...)
+    local logical = fallbackOf[event]
+    if logical then event = logical end
     if not callbacks[event] then return end
     for owner, callback in pairs(callbacks[event]) do
         local success, err = pcall(callback, event, ...)
@@ -42,11 +60,25 @@ function Events:Register(event, callback, owner)
         if not customEvents[event] then
             local ok = pcall(eventFrame.RegisterEvent, eventFrame, event)
             if not ok then
-                -- Registration failed: the event simply never fires here. Keep
-                -- the callback table so Unregister stays symmetrical.
-                Events.unsupported[event] = true
+                -- Registration failed. Try the older equivalent before giving
+                -- up -- otherwise the feature is silently dead on this client.
+                local fallback = EVENT_FALLBACKS[event]
+                local fallbackOk = false
+                if fallback then
+                    fallbackOk = pcall(eventFrame.RegisterEvent, eventFrame, fallback)
+                    if fallbackOk then fallbackOf[fallback] = event end
+                end
+                if not fallbackOk then
+                    -- The event simply never fires here. Keep the callback
+                    -- table so Unregister stays symmetrical.
+                    Events.unsupported[event] = true
+                end
                 if ns.ErrorSink then
-                    ns.ErrorSink:Capture("unsupported event: " .. tostring(event), "Events:Register")
+                    ns.ErrorSink:Capture(
+                        ("unsupported event: %s (%s)"):format(
+                            tostring(event),
+                            fallbackOk and ("using " .. fallback) or "no fallback"),
+                        "Events:Register")
                 end
             end
         end
@@ -69,7 +101,13 @@ function Events:Unregister(event, owner)
         -- Only unregister for WoW system events, and never for one that failed
         -- to register in the first place (UnregisterEvent raises on those too).
         if not customEvents[event] and not Events.unsupported[event] then
-            pcall(eventFrame.UnregisterEvent, eventFrame, event)
+            -- Drop the fallback we actually registered, not the modern name
+            -- this client never accepted.
+            local actual = event
+            for fallback, logical in pairs(fallbackOf) do
+                if logical == event then actual = fallback break end
+            end
+            pcall(eventFrame.UnregisterEvent, eventFrame, actual)
         end
     end
 end

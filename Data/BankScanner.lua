@@ -357,14 +357,23 @@ if not ns.IsRetail then
         end
     end, BankScanner)
 
-    Events:Register("BAG_UPDATE", function(event, bagID)
+    local function OnBankContainerEvent(event, bagID)
         if bagID and bagID >= -1 and bagID <= 11 then
             local isBankBag = bagID == -1 or (bagID >= 5 and bagID <= 11)
             if isBankBag then
                 OnBankUpdate(bagID)
             end
         end
-    end, BankScanner)
+    end
+
+    Events:Register("BAG_UPDATE", OnBankContainerEvent, BankScanner)
+
+    -- Pulling a bag OUT of a bank bag slot reports BAG_CLOSED for that
+    -- container, not BAG_UPDATE. Without this the bank keeps showing the
+    -- removed bag's slots and its icon on the bag slot button, because nothing
+    -- ever marks the container dirty. BagScanner registers BAG_CLOSED too, but
+    -- its handler filters bank bagIDs out, so the bank needs its own.
+    Events:Register("BAG_CLOSED", OnBankContainerEvent, BankScanner)
 
     -- For these events, scan all bank bags since we don't know which specific bag changed
     Events:Register("PLAYERBANKSLOTS_CHANGED", function()

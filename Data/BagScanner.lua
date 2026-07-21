@@ -380,6 +380,14 @@ end, BagScanner)
 
 Events:OnBagUpdate(OnBagUpdate, BagScanner)
 
+-- Removing a bag from a bag slot does not always produce a BAG_UPDATE for the
+-- container that just went away on 3.3.5a -- BAG_CLOSED is the signal for that.
+-- Route it through the same dirty-bag path: rescanning a bag that no longer
+-- exists simply reports zero slots, which is exactly the state we want shown.
+-- Registration is pcall-guarded upstream, so this is inert where the event
+-- does not exist.
+Events:Register("BAG_CLOSED", OnBagUpdate, BagScanner)
+
 -- Handle BAGS_UPDATED event (fired after sort completes)
 -- This ensures bags are rescanned and UI refreshed after sorting
 Events:Register("BAGS_UPDATED", function()

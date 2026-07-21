@@ -944,13 +944,18 @@ function BankFooter:Init(parent)
     -- Repaint bag-slot textures when an equipped bank bag is swapped/added/removed.
     -- PLAYERBANKBAGSLOTS_CHANGED only reliably fires for slot purchases on Classic, so
     -- we react to BAG_UPDATE for the bank-bag bagIDs (5-11) instead.
-    Events:Register("BAG_UPDATE", function(event, bagID)
+    -- Removal specifically reports BAG_CLOSED rather than BAG_UPDATE, which is
+    -- why the removed bag's icon used to stay on the slot button.
+    local function OnBankBagSlotChanged(event, bagID)
         if not bagID or bagID < 5 or bagID > 11 then return end
         if viewingCharacter then return end
         if not BankScanner:IsBankOpen() then return end
         BankFooter:Update()
         UpdateFlyoutSlots()
-    end, BankFooter)
+    end
+
+    Events:Register("BAG_UPDATE", OnBankBagSlotChanged, BankFooter)
+    Events:Register("BAG_CLOSED", OnBankBagSlotChanged, BankFooter)
 
     -- Slot counter after bag containers (with tooltip frame for hover)
     local slotInfoFrame = CreateFrame("Frame", nil, frame)

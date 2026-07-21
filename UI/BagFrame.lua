@@ -60,6 +60,38 @@ local cachedItemCategory = {} -- Key: "bagID:slot" -> previous categoryId (for c
 local cachedItemCharges = {} -- Key: "bagID:slot" -> previous charges value
 local layoutCached = false -- True when layout is cached and can do incremental updates
 
+-- Per-bag slot counts as of the currently cached layout.
+--
+-- Equipping or removing a bag changes how many slots the grid must show, and
+-- NO incremental path can express that: they only repaint existing buttons or
+-- convert them to ghost slots (Rule 1). The result is a grid that keeps showing
+-- a removed bag's slots -- with no error, because nothing actually failed.
+-- Detect the change here and fall back to a full rebuild.
+local layoutBagSlots = {}
+
+-- Returns true when the bag layout differs from the cached one, resyncing the
+-- snapshot as it goes. A handful of GetContainerNumSlots calls per bag-update
+-- batch, on a table that is never reallocated (Rule 2).
+local function SyncBagSlotLayout()
+    local changed = false
+    for _, bagID in ipairs(Constants.BAG_IDS) do
+        local numSlots = C_Container.GetContainerNumSlots(bagID) or 0
+        if layoutBagSlots[bagID] ~= numSlots then
+            layoutBagSlots[bagID] = numSlots
+            changed = true
+        end
+    end
+    if Constants.KEYRING_BAG_ID then
+        local bagID = Constants.KEYRING_BAG_ID
+        local numSlots = C_Container.GetContainerNumSlots(bagID) or 0
+        if layoutBagSlots[bagID] ~= numSlots then
+            layoutBagSlots[bagID] = numSlots
+            changed = true
+        end
+    end
+    return changed
+end
+
 -- Category View: Item-key-based button tracking for efficient reuse
 -- This allows button reuse when items move, avoiding expensive SetItem calls
 local buttonsByItemKey = {}  -- Key: itemKey -> {button1, button2, ...} (array for stacked items)
@@ -1326,6 +1358,15 @@ function BagFrame:IncrementalUpdate(dirtyBags)
 
     if not layoutCached then
         -- No cached layout, do full refresh
+        self:Refresh()
+        return
+    end
+
+    -- A bag was equipped or removed: the slot count changed, so the layout has
+    -- to be rebuilt rather than repainted. Refresh resyncs the snapshot itself
+    -- by way of the call above, so no bookkeeping is needed here.
+    if SyncBagSlotLayout() then
+        ns:Debug("IncrementalUpdate REFRESH: bag slot layout changed")
         self:Refresh()
         return
     end
