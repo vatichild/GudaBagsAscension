@@ -227,13 +227,6 @@ English, French, German, Russian, Portuguese, Spanish (Spain and Mexico), Chines
 
 ---
 
-## Working on the code
-
-- `docs/RULES.md` covers the rules this addon is built around: pseudo slots, performance, combat lockdown, the sort engine, localization and how changes get made. Read it before you change anything.
-- `docs/ASCENSION-API.md` is a reference for the parts of the API that are specific to the Ascension client, written up while porting.
-
----
-
 ## Bugs and requests
 
 Open an issue on [GitHub](https://github.com/vatichild/GudaBagsAscension/issues).
