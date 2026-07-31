@@ -321,25 +321,41 @@ end
 --- cached character's records (their bagID/slot index the CURRENT character's
 --- bags, so a live lookup would identify the wrong stack). Callers in read-only
 --- or guild-bank context use IsItemLocked directly.
-function Database:IsSlotLocked(bagID, slot, itemID)
+---
+--- verifySlot: pass true when (bagID, slot) came from a button's cached record
+--- rather than from a live iteration. A GUID identifies whatever occupies the slot
+--- RIGHT NOW, so a button still pointing at a slot whose contents have changed
+--- would otherwise adopt the new occupant's lock -- locking item B would light up
+--- the marker on item A's button. Category view can leave buttons pointing at a
+--- stale slot (grouped/orphaned buttons are not re-pointed on every refresh), so
+--- the coordinates are only trusted when the slot still holds the expected itemID.
+function Database:IsSlotLocked(bagID, slot, itemID, verifySlot)
     if HasGUIDLocks() then
-        local guid = Utils:GetItemGUID(bagID, slot)
-        if guid and self:IsItemLockedByGUID(guid) then return true end
+        local trustSlot = true
+        if verifySlot then
+            local info = C_Container.GetContainerItemInfo(bagID, slot)
+            trustSlot = info ~= nil and info.itemID == itemID
+        end
+        if trustSlot then
+            local guid = Utils:GetItemGUID(bagID, slot)
+            if guid and self:IsItemLockedByGUID(guid) then return true end
+        end
     end
     return self:IsItemLocked(itemID)
 end
 
---- Same question given a live scan record.
---- Guild bank records are handled here: their bagID is a tabIndex, which collides
---- with real bag and bank bag IDs, so a live GUID lookup would name an unrelated
---- stack in the player's own bags. Read-only (cached character) records cannot be
---- detected from the record alone -- callers gate that on button.isReadOnly.
+--- Same question given a button's cached scan record. Always verifies the slot --
+--- see IsSlotLocked. Guild bank records are handled here: their bagID is a
+--- tabIndex, which collides with real bag and bank bag IDs, so a live GUID lookup
+--- would name an unrelated stack in the player's own bags. Read-only (cached
+--- character) records cannot be detected from the record alone -- callers gate
+--- that on button.isReadOnly.
 function Database:IsItemLockedFor(itemData)
     if not itemData then return false end
     if itemData.isGuildBank then
         return self:IsItemLocked(itemData.itemID)
     end
-    return self:IsSlotLocked(itemData.bagID, itemData.slot, itemData.itemID)
+    return self:IsSlotLocked(itemData.bagID, itemData.slot, itemData.itemID, true)
 end
 
 --- Toggle the lock for one physical stack. Returns the new locked state.

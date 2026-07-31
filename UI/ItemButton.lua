@@ -86,19 +86,32 @@ end
 local function SuppressItemErrors()
 end
 
--- Show a marker icon and its black outline copy in the correct draw order.
+-- MARKER OUTLINES -- why the outline textures live on ARTWORK, not OVERLAY.
 --
--- Each marker (lock, tracked star, category mark) is two textures on the same draw
--- layer: a slightly larger black copy for the outline, and the coloured icon on
--- top. Their stacking was expressed only through the 4th `subLevel` argument of
--- CreateTexture -- which stock 3.3.5a does not have and silently ignores. That
--- leaves the client free to order same-layer textures by when they were last
--- shown, and every call site used to Show() the black copy LAST, putting it over
--- the icon. Result: markers rendered black instead of gold, intermittently,
--- depending on which refresh path last touched them.
+-- Each marker (lock, tracked star, pin, category mark) is two textures: a slightly
+-- larger black copy for the outline, and the coloured icon on top. Upstream
+-- GudaBags puts both on OVERLAY and expresses the stacking purely through the 4th
+-- `subLevel` argument of CreateTexture (outline 2/4/6, icon 3/5/7).
 --
--- Showing the outline first makes all three ordering signals agree (creation
--- order, subLevel hint, show order), so the icon is on top under any of them.
+-- That works on upstream's target clients, but **stock 3.3.5a has no texture
+-- sublevels** -- the argument is accepted and silently ignored. The ordering
+-- guarantee evaporates, leaving the two textures at the same depth with the
+-- renderer free to pick, which is why locks and stars rendered part-black here and
+-- never do upstream.
+--
+-- Draw LAYER ordering is the one rule enforced on every client version
+-- (BACKGROUND < BORDER < ARTWORK < OVERLAY < HIGHLIGHT), so the outline goes on
+-- ARTWORK and the icon stays on OVERLAY. The icon can no longer end up behind its
+-- own outline regardless of sublevel support, creation order or show order.
+--
+-- The three outlines parented to the button share ARTWORK with button.icon (the
+-- item picture). They are created later so they draw above it; if that ever
+-- flipped the outline would simply be hidden behind the item art -- a cosmetic
+-- loss, never a black marker. userLockIconStroke has no such neighbour: its parent
+-- frame holds only the lock pair.
+--
+-- Showing the outline before the icon costs nothing and keeps every ordering
+-- signal pointing the same way.
 local function ShowMarkerPair(outline, icon)
     if outline then outline:Show() end
     if icon then icon:Show() end
@@ -936,8 +949,9 @@ local function CreateButton(parent)
     button.craftingQualityFrame = craftingQualityFrame
     button.craftingQualityIcon = craftingQualityIcon
 
-    -- Tracked/favorite icon shadow (for darker stroke effect, drawn behind the icon)
-    local trackedIconShadow = button:CreateTexture(nil, "OVERLAY", nil, 2)
+    -- Tracked/favorite icon shadow (for darker stroke effect, drawn behind the icon).
+    -- ARTWORK, not OVERLAY -- see the marker outline note above ShowMarkerPair.
+    local trackedIconShadow = button:CreateTexture(nil, "ARTWORK", nil, 5)
     trackedIconShadow:SetSize(14, 14)
     trackedIconShadow:SetPoint("CENTER", button, "CENTER", 0, 0)
     trackedIconShadow:SetTexture("Interface\\AddOns\\GudaBags\\Assets\\fav.tga")
@@ -967,8 +981,9 @@ local function CreateButton(parent)
     upgradeArrow:Hide()
     button.upgradeArrow = upgradeArrow
 
-    -- Equipment set icon shadow (bottom-left corner)
-    local equipSetIconShadow = button:CreateTexture(nil, "OVERLAY", nil, 2)
+    -- Equipment set icon shadow (bottom-left corner).
+    -- ARTWORK, not OVERLAY -- see the marker outline note above ShowMarkerPair.
+    local equipSetIconShadow = button:CreateTexture(nil, "ARTWORK", nil, 5)
     equipSetIconShadow:SetSize(15, 15)
     equipSetIconShadow:SetPoint("BOTTOMLEFT", button, "BOTTOMLEFT", 0, 0)
     equipSetIconShadow:SetTexture("Interface\\AddOns\\GudaBags\\Assets\\equipment.tga")
@@ -984,8 +999,9 @@ local function CreateButton(parent)
     equipSetIcon:Hide()
     button.equipSetIcon = equipSetIcon
 
-    -- Pin icon shadow (bottom-left corner, replaces category mark when pinned)
-    local pinIconShadow = button:CreateTexture(nil, "OVERLAY", nil, 4)
+    -- Pin icon shadow (bottom-left corner, replaces category mark when pinned).
+    -- ARTWORK, not OVERLAY -- see the marker outline note above ShowMarkerPair.
+    local pinIconShadow = button:CreateTexture(nil, "ARTWORK", nil, 5)
     pinIconShadow:SetSize(15, 15)
     pinIconShadow:SetPoint("BOTTOMLEFT", button, "BOTTOMLEFT", 0, 0)
     pinIconShadow:SetTexture("Interface\\AddOns\\GudaBags\\Assets\\pin.tga")
@@ -1006,8 +1022,11 @@ local function CreateButton(parent)
     userLockFrame:SetAllPoints(button)
     userLockFrame:SetFrameLevel(button:GetFrameLevel() + Constants.FRAME_LEVELS.BORDER + 2)
 
-    -- User lock icon stroke (bottom-right corner, slightly larger black copy for outline)
-    local userLockIconStroke = userLockFrame:CreateTexture(nil, "OVERLAY", nil, 6)
+    -- User lock icon stroke (bottom-right corner, slightly larger black copy for
+    -- outline). ARTWORK, not OVERLAY -- see the note above ShowMarkerPair. This one
+    -- is the safest of the four: userLockFrame holds nothing else, so ARTWORK vs
+    -- OVERLAY here is an unambiguous two-texture ordering with nothing to race.
+    local userLockIconStroke = userLockFrame:CreateTexture(nil, "ARTWORK", nil, 5)
     userLockIconStroke:SetSize(11, 11)
     userLockIconStroke:SetPoint("BOTTOMRIGHT", button, "BOTTOMRIGHT", 5, -4)
     userLockIconStroke:SetTexture("Interface\\AddOns\\GudaBags\\Assets\\lock.tga")
@@ -2938,9 +2957,21 @@ end
 function ItemButton:UpdateLockForItem(bagID, slotID)
     if not buttonPool then return end
 
+    local itemInfo = C_Container.GetContainerItemInfo(bagID, slotID)
+
     for button in buttonPool:EnumerateActive() do
-        if button.itemData and button.itemData.bagID == bagID and button.itemData.slot == slotID then
-            local itemInfo = C_Container.GetContainerItemInfo(bagID, slotID)
+        -- Match on coordinates AND item identity. Coordinates alone are not enough:
+        -- a button left pointing at a slot whose contents have since changed would
+        -- claim this event and adopt the new occupant's lock state, painting the
+        -- marker onto the wrong item. Only the button actually displaying what is
+        -- in the slot right now may take it.
+        --
+        -- Exception: when the slot is now empty there is no identity to match, and
+        -- whatever button still points there is about to become a ghost -- let it
+        -- through so its lock overlay and marker get cleared rather than stuck on.
+        local d = button.itemData
+        if d and d.bagID == bagID and d.slot == slotID
+            and (itemInfo == nil or d.itemID == itemInfo.itemID) then
             local isLocked = itemInfo and itemInfo.isLocked or false
 
             -- Update cached state

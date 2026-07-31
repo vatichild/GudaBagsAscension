@@ -209,6 +209,7 @@ The 3.3.5a client tells you a lot less than Retail does when something goes wron
 | `/gberrors` | Show Lua errors that were caught. `/gberrors clear` empties the list. |
 | `/gbdiag` | Dump what the compatibility shim did, plus frame and mouse diagnostics |
 | `/gbdiag guid` | Check whether this client's item GUIDs are real per-item identities. Run it, swap two items between occupied slots, run it again. |
+| `/gbdiag markers` | Check every bag button's cached item against the live slot. Run it when a lock, pin or star icon shows up on the wrong item. |
 | `/gbdiag unblock` | Turn off the mouse on frames that are eating your clicks |
 | `/gbtrace on\|off\|dump` | Leave breadcrumbs that survive a client crash |
 

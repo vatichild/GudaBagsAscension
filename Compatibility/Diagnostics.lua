@@ -364,12 +364,82 @@ local function DumpItemGUIDs()
     guidSnapshot = bySlot
 end
 
+--- Dump every active item button's cached identity against the live slot.
+---
+--- The failure this exists to catch: a button whose cached bagID/slot points at a
+--- slot that now holds a different item. Marker code resolves lock state from
+--- those coordinates, so a stale button adopts the current occupant's lock and the
+--- icon lights up on the wrong item. Category view can leave buttons stale
+--- (grouped and orphaned buttons are not re-pointed on every refresh).
+---
+--- Run it with bags open, ideally right after locking something that made a wrong
+--- icon appear. STALE lines are the smoking gun; ORPHAN counts buttons whose slot
+--- no longer exists at all.
+local function DumpMarkerState()
+    line("---- item button marker state ----")
+
+    local ItemButton = ns:GetModule("ItemButton")
+    if not ItemButton or not ItemButton.GetActiveButtons then
+        line("ItemButton module unavailable")
+        return
+    end
+
+    local total, stale, orphan, lockShown, strokeShown, shownPairs = 0, 0, 0, 0, 0, 0
+
+    for button in ItemButton:GetActiveButtons() do
+        local d = button.itemData
+        if d and d.itemID then
+            total = total + 1
+            local liveID = nil
+            if not d.isGuildBank and d.bagID and d.slot then
+                local info = C_Container.GetContainerItemInfo(d.bagID, d.slot)
+                liveID = info and info.itemID or nil
+            end
+
+            local lockOn   = button.userLockIcon and button.userLockIcon:IsShown() or false
+            local strokeOn = button.userLockIconStroke and button.userLockIconStroke:IsShown() or false
+            if lockOn then lockShown = lockShown + 1 end
+            if strokeOn then strokeShown = strokeShown + 1 end
+            if lockOn and strokeOn then shownPairs = shownPairs + 1 end
+
+            if liveID == nil then
+                orphan = orphan + 1
+                if orphan <= 8 then
+                    line("  ORPHAN %s:%s shows itemID=%s but slot is EMPTY (lock=%s stroke=%s)",
+                        tostring(d.bagID), tostring(d.slot), tostring(d.itemID),
+                        tostring(lockOn), tostring(strokeOn))
+                end
+            elseif liveID ~= d.itemID then
+                stale = stale + 1
+                if stale <= 8 then
+                    line("  STALE %s:%s shows itemID=%s but slot holds %s (lock=%s stroke=%s)",
+                        tostring(d.bagID), tostring(d.slot), tostring(d.itemID),
+                        tostring(liveID), tostring(lockOn), tostring(strokeOn))
+                end
+            end
+        end
+    end
+
+    line("active item buttons: %d, stale: %d, orphaned: %d", total, stale, orphan)
+    line("lock icon shown: %d, stroke shown: %d, both shown: %d", lockShown, strokeShown, shownPairs)
+    if lockShown ~= strokeShown then
+        line("MISMATCH: icon and outline show counts differ -- one is shown without the other.")
+    end
+    if stale > 0 or orphan > 0 then
+        line("VERDICT: stale buttons present. A lock resolved from their coordinates")
+        line("lands on the wrong item. This is the wrong-icon cause.")
+    else
+        line("VERDICT: every active button matches its slot. Wrong icons are NOT")
+        line("caused by stale coordinates -- look at draw order or texture state.")
+    end
+end
+
 -- Bump on every change to this file. Editing a Lua file does not affect the
 -- running session, so a /gbdiag issued before the next /reload silently reports
 -- from the OLD code -- which has already cost a round trip. Stamping the build
 -- into the report makes stale output obvious at a glance instead of something to
 -- reconstruct from file timestamps.
-local DIAG_BUILD = "2026-08-01-b (item GUID probe keyed by slot, not by guid)"
+local DIAG_BUILD = "2026-08-01-c (marker state dump: /gbdiag markers)"
 
 local function RunDiagnostics()
     report = {}   -- the ONE place a full run clears accumulated output
@@ -623,6 +693,13 @@ SlashCmdList["GUDABAGSDIAG"] = function(arg)
         pcall(DumpChildren)
         GudaBags_Diag = report
         DEFAULT_CHAT_FRAME:AddMessage("|cff00ccff[diag]|r saved to GudaBags_Diag -- /reload to write it")
+        return
+    elseif arg == "markers" then
+        report = {}
+        pcall(DumpMarkerState)
+        GudaBags_Diag = report
+        DEFAULT_CHAT_FRAME:AddMessage(
+            "|cff00ccff[diag]|r saved to GudaBags_Diag -- /reload to write it to disk")
         return
     elseif arg == "guid" then
         -- Reset only on the baseline run. The baseline and the after-move run are
