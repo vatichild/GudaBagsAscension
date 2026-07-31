@@ -527,26 +527,27 @@ local function CreateBagFrame()
     return f
 end
 
--- Iterate the active pool filtered by owner rather than buttonsBySlot: in category
--- view with "Group identical items" on, several slots collapse onto one button and
--- only one of them lands in buttonsBySlot, so slot-keyed iteration silently skips
--- buttons and their icons don't repaint until the next full refresh. Same owner-
--- filter pattern as ItemButton:ResetAllAlpha.
+-- Iterate buttonsBySlot, NOT the active button pool.
+--
+-- buttonsBySlot holds exactly the buttons currently rendered for a real item: the
+-- render loop registers every non-pseudo button there (grouping is applied upstream
+-- in LayoutEngine, so a grouped stack is one entry, not one per slot). Anything
+-- active but absent from it is stale -- an orphaned button left over from a
+-- previous layout, still showing an old item at an old position.
+--
+-- Sweeping the whole pool instead looks more thorough but is actively wrong:
+-- marker state is resolved from each button's cached bagID/slot, so repainting a
+-- stale button makes it adopt the lock of whatever now occupies its old slot --
+-- lock item B and the icon lights up on item A.
 function BagFrame:RefreshPinIcons()
-    if not frame then return end
-    for button in ItemButton:GetActiveButtons() do
-        if button.owner == frame.container then
-            ItemButton:UpdatePinIcon(button)
-        end
+    for _, button in pairs(buttonsBySlot) do
+        ItemButton:UpdatePinIcon(button)
     end
 end
 
 function BagFrame:RefreshLockIcons()
-    if not frame then return end
-    for button in ItemButton:GetActiveButtons() do
-        if button.owner == frame.container then
-            ItemButton:UpdateUserLockIcon(button)
-        end
+    for _, button in pairs(buttonsBySlot) do
+        ItemButton:UpdateUserLockIcon(button)
     end
 end
 

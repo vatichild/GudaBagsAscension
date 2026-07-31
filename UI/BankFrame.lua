@@ -1474,24 +1474,18 @@ function BankFrame:FilterBankByTab(bank, tabIndex, isWarbandView)
     return filtered
 end
 
--- Iterate the active pool filtered by owner rather than buttonsBySlot — grouped
--- identical items collapse several slots onto one button, so slot-keyed iteration
--- skips buttons. See the matching note in UI/BagFrame.lua.
+-- Iterate buttonsBySlot, NOT the active button pool — sweeping the pool repaints
+-- stale orphaned buttons, which then adopt the lock of whatever now occupies their
+-- old slot. See the fuller note in UI/BagFrame.lua.
 function BankFrame:RefreshPinIcons()
-    if not frame then return end
-    for button in ItemButton:GetActiveButtons() do
-        if button.owner == frame.container then
-            ItemButton:UpdatePinIcon(button)
-        end
+    for _, button in pairs(buttonsBySlot) do
+        ItemButton:UpdatePinIcon(button)
     end
 end
 
 function BankFrame:RefreshLockIcons()
-    if not frame then return end
-    for button in ItemButton:GetActiveButtons() do
-        if button.owner == frame.container then
-            ItemButton:UpdateUserLockIcon(button)
-        end
+    for _, button in pairs(buttonsBySlot) do
+        ItemButton:UpdateUserLockIcon(button)
     end
 end
 
