@@ -109,7 +109,7 @@ A full replacement for the guild bank window, with tab navigation, search, and s
 
 ## Keeping items safe
 
-- **Locking.** Lock an item and it can't be sold, deleted or disenchanted by accident. Locked items get a lock icon and are skipped at merchants.
+- **Locking.** Lock an item and it can't be sold, deleted or disenchanted by accident. Locked items get a lock icon and are skipped at merchants. The lock is on the stack you clicked, not on every copy you own, so you can lock one stack of a reagent and still sell the rest.
 - **Equipment sets.** Anything in an equipment set is protected from selling. You can turn this off if you'd rather not.
 
 ---
@@ -208,6 +208,7 @@ The 3.3.5a client tells you a lot less than Retail does when something goes wron
 |---|---|
 | `/gberrors` | Show Lua errors that were caught. `/gberrors clear` empties the list. |
 | `/gbdiag` | Dump what the compatibility shim did, plus frame and mouse diagnostics |
+| `/gbdiag guid` | Check whether this client's item GUIDs are real per-item identities. Run it, swap two items between occupied slots, run it again. |
 | `/gbdiag unblock` | Turn off the mouse on frames that are eating your clicks |
 | `/gbtrace on\|off\|dump` | Leave breadcrumbs that survive a client crash |
 

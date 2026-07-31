@@ -5,6 +5,7 @@ ns:RegisterModule("Database", Database)
 
 local Constants = ns.Constants
 local Events = ns:GetModule("Events")
+local Utils = ns:GetModule("Utils")
 
 local playerFullName
 local isFreshInstall = false
@@ -54,6 +55,9 @@ local function InitializeCharDB()
 
     GudaBags_CharDB.pinnedSlots = GudaBags_CharDB.pinnedSlots or {}
     GudaBags_CharDB.lockedItems = GudaBags_CharDB.lockedItems or {}
+    -- Additive: lockedItems (itemID-wide) is kept and still honoured so existing
+    -- locks survive, and a downgrade to a build without lockedGUIDs loses nothing.
+    GudaBags_CharDB.lockedGUIDs = GudaBags_CharDB.lockedGUIDs or {}
     GudaBags_CharDB.setProtectionExceptions = GudaBags_CharDB.setProtectionExceptions or {}
     GudaBags_CharDB.markedJunk = GudaBags_CharDB.markedJunk or {}
 
@@ -262,6 +266,98 @@ function Database:ToggleItemLock(itemID)
         GudaBags_CharDB.lockedItems[itemID] = true
         return true
     end
+end
+
+-------------------------------------------------
+-- Locked Items, per physical stack (per-character, GUID-based)
+-------------------------------------------------
+--
+-- lockedItems above is keyed by itemID, so it locks an item *type* -- every stack
+-- and every copy. On Ascension, GetContainerItemGUID gives a real per-item
+-- identity (see Core/Utils.lua), so a lock can name the exact stack the user
+-- clicked. Stored as guid -> itemID; the itemID is kept so the entry is still
+-- meaningful for chat messages and future UI without a bag lookup.
+--
+-- The GUID is resolved LIVE from (bagID, slot) at every query, never cached on the
+-- scan record. Three reasons: scan records are persisted verbatim to
+-- SavedVariables (a stored guid would bloat the DB with a stale identity); the
+-- grouped-stack record built in UI/BagFrame/LayoutEngine.lua carries only a subset
+-- of fields, so a cached guid would silently vanish for grouped items; and the
+-- incremental update path can hand a button a record from an earlier scan.
+--
+-- Cost is gated on HasGUIDLocks(): with no per-stack locks stored -- the common
+-- case -- not a single API call is made and every query is one table lookup.
+--
+-- Never auto-pruned: a locked item sitting in the bank or in the mail must stay
+-- locked, and the table only ever holds the handful of stacks a user locks.
+
+local function HasGUIDLocks()
+    local t = GudaBags_CharDB and GudaBags_CharDB.lockedGUIDs
+    return t ~= nil and next(t) ~= nil
+end
+
+function Database:IsItemLockedByGUID(guid)
+    if not guid or not GudaBags_CharDB or not GudaBags_CharDB.lockedGUIDs then return false end
+    return GudaBags_CharDB.lockedGUIDs[guid] ~= nil
+end
+
+function Database:ToggleItemLockByGUID(guid, itemID)
+    if not guid or not GudaBags_CharDB then return false end
+    GudaBags_CharDB.lockedGUIDs = GudaBags_CharDB.lockedGUIDs or {}
+    if GudaBags_CharDB.lockedGUIDs[guid] then
+        GudaBags_CharDB.lockedGUIDs[guid] = nil
+        return false
+    else
+        GudaBags_CharDB.lockedGUIDs[guid] = itemID or true
+        return true
+    end
+end
+
+--- Is this live bag/bank slot locked? The single read entry point.
+--- Checks the per-stack GUID first, then falls back to the legacy itemID-wide
+--- store so pre-existing locks (and clients with no GUID API) keep working.
+---
+--- Must NOT be called for guild bank slots (a tabIndex is not a bagID) or for a
+--- cached character's records (their bagID/slot index the CURRENT character's
+--- bags, so a live lookup would identify the wrong stack). Callers in read-only
+--- or guild-bank context use IsItemLocked directly.
+function Database:IsSlotLocked(bagID, slot, itemID)
+    if HasGUIDLocks() then
+        local guid = Utils:GetItemGUID(bagID, slot)
+        if guid and self:IsItemLockedByGUID(guid) then return true end
+    end
+    return self:IsItemLocked(itemID)
+end
+
+--- Same question given a live scan record.
+--- Guild bank records are handled here: their bagID is a tabIndex, which collides
+--- with real bag and bank bag IDs, so a live GUID lookup would name an unrelated
+--- stack in the player's own bags. Read-only (cached character) records cannot be
+--- detected from the record alone -- callers gate that on button.isReadOnly.
+function Database:IsItemLockedFor(itemData)
+    if not itemData then return false end
+    if itemData.isGuildBank then
+        return self:IsItemLocked(itemData.itemID)
+    end
+    return self:IsSlotLocked(itemData.bagID, itemData.slot, itemData.itemID)
+end
+
+--- Toggle the lock for one physical stack. Returns the new locked state.
+---
+--- A legacy itemID-wide lock is cleared first when present, so a user carrying
+--- pre-GUID locks can remove them with the same click instead of the lock
+--- appearing stuck (the GUID entry would otherwise be shadowed by the itemID one
+--- in IsItemLockedFor). Falls back to the itemID store when no GUID resolves.
+function Database:ToggleItemLockFor(bagID, slot, itemID)
+    if itemID and self:IsItemLocked(itemID) then
+        self:ToggleItemLock(itemID)
+        return false
+    end
+    local guid = Utils:GetItemGUID(bagID, slot)
+    if guid then
+        return self:ToggleItemLockByGUID(guid, itemID)
+    end
+    return self:ToggleItemLock(itemID)
 end
 
 -------------------------------------------------

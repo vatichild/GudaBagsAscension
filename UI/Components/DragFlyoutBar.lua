@@ -142,6 +142,18 @@ end
 -- Tooltip helpers (state-aware, reads cursor item state)
 -------------------------------------------------
 
+-- Is the stack currently being dragged user-locked? The lock is per stack, so ask
+-- about the drag source slot when it is known; without it only the itemID-wide
+-- answer is available.
+local function IsDraggedItemLocked()
+    local Database = ns:GetModule("Database")
+    if not Database or not currentItemID then return false end
+    if currentBagID and currentSlot then
+        return Database:IsSlotLocked(currentBagID, currentSlot, currentItemID)
+    end
+    return Database:IsItemLocked(currentItemID)
+end
+
 local function GetTooltipText(targetType)
     local L = ns.L
 
@@ -150,8 +162,7 @@ local function GetTooltipText(targetType)
         local isOn = TrackedBar and currentItemID and TrackedBar:IsTracked(currentItemID)
         return isOn and L["TOOLTIP_FLYOUT_TRACK_ON"] or L["TOOLTIP_FLYOUT_TRACK_OFF"]
     elseif targetType == "lock" then
-        local Database = ns:GetModule("Database")
-        local isOn = Database and currentItemID and Database:IsItemLocked(currentItemID)
+        local isOn = IsDraggedItemLocked()
         return isOn and L["TOOLTIP_FLYOUT_LOCK_ON"] or L["TOOLTIP_FLYOUT_LOCK_OFF"]
     elseif targetType == "pin" then
         local Database = ns:GetModule("Database")
@@ -278,7 +289,7 @@ UpdateButtonState = function()
     end
 
     tint("track", TrackedBar and currentItemID and TrackedBar:IsTracked(currentItemID))
-    tint("lock",  Database and currentItemID and Database:IsItemLocked(currentItemID))
+    tint("lock",  IsDraggedItemLocked())
     tint("pin",   Database and currentBagID and currentSlot and Database:IsPinnedSlot(currentBagID, currentSlot))
     tint("junk",  Database and currentItemID and Database:IsItemMarkedJunk(currentItemID))
 end
@@ -385,9 +396,18 @@ function DragFlyoutBar:HandleDrop(targetType)
         end
 
     elseif targetType == "lock" then
+        -- Resolve the source slot BEFORE ClearCursor: the lock is per stack, and
+        -- GetCursorBagSlot identifies the origin by its still-locked slot, which
+        -- clearing the cursor undoes. Same ordering as the pin branch below.
+        local bagID, slot
+        if BagFrame and BagFrame.GetCursorBagSlot then
+            bagID, slot = BagFrame:GetCursorBagSlot()
+        end
+        bagID = bagID or currentBagID
+        slot = slot or currentSlot
         ClearCursor()
         if Database then
-            Database:ToggleItemLock(itemID)
+            Database:ToggleItemLockFor(bagID, slot, itemID)
         end
         if BagFrame then
             BagFrame:Refresh()

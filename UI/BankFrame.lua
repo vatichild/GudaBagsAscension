@@ -1474,15 +1474,24 @@ function BankFrame:FilterBankByTab(bank, tabIndex, isWarbandView)
     return filtered
 end
 
+-- Iterate the active pool filtered by owner rather than buttonsBySlot — grouped
+-- identical items collapse several slots onto one button, so slot-keyed iteration
+-- skips buttons. See the matching note in UI/BagFrame.lua.
 function BankFrame:RefreshPinIcons()
-    for _, button in pairs(buttonsBySlot) do
-        ItemButton:UpdatePinIcon(button)
+    if not frame then return end
+    for button in ItemButton:GetActiveButtons() do
+        if button.owner == frame.container then
+            ItemButton:UpdatePinIcon(button)
+        end
     end
 end
 
 function BankFrame:RefreshLockIcons()
-    for _, button in pairs(buttonsBySlot) do
-        ItemButton:UpdateUserLockIcon(button)
+    if not frame then return end
+    for button in ItemButton:GetActiveButtons() do
+        if button.owner == frame.container then
+            ItemButton:UpdateUserLockIcon(button)
+        end
     end
 end
 
@@ -2836,6 +2845,13 @@ function BankFrame:Hide()
         and not viewingCharacter
         and not SearchBar:HasActiveFilters(frame)
 
+    -- Undo any footer bag-slot hover dim before hiding — the footer widget's
+    -- OnLeave never fires when the frame is hidden out from under the cursor, and
+    -- the retained layout is re-shown without repainting. Flag-gated no-op sweep.
+    if frame.container and ItemButton:IsHighlightDimActive(frame.container) then
+        ItemButton:ResetAllAlpha(frame.container)
+    end
+
     frame:Hide()
     -- Reset transient search toggle so next open starts collapsed
     self:ResetSearchToggle()
@@ -3207,7 +3223,12 @@ function BankFrame:IncrementalUpdate(dirtyBags)
                         end
                     end
                 elseif newItemData then
-                    -- Same item - only update if count changed (stacking)
+                    -- Same item - only update if count changed (stacking).
+                    -- Re-point itemData even though we skip SetItem: the old table is
+                    -- a previous scan's snapshot, so its `locked`/`bagID`/`slot` go
+                    -- stale and UpdateLockForItem (which matches on itemData.bagID/
+                    -- slot) would paint the lock overlay onto the wrong button.
+                    button.itemData = newItemData
                     local oldCount = cachedItemCount[slotKey]
                     if oldCount ~= newItemData.count then
                         SetItemButtonCount(button, newItemData.count)
@@ -3253,7 +3274,9 @@ function BankFrame:IncrementalUpdate(dirtyBags)
                             end
                         end
                     elseif newItemData then
-                        -- Same item - only update if count changed (stacking)
+                        -- Same item - only update if count changed (stacking).
+                        -- Re-point itemData: see the note on the category-view path.
+                        button.itemData = newItemData
                         local oldCount = cachedItemCount[slotKey]
                         if oldCount ~= newItemData.count then
                             SetItemButtonCount(button, newItemData.count)

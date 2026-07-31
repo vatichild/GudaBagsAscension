@@ -32,6 +32,29 @@ function Utils:GetSlotKey(bagID, slot)
 end
 
 -------------------------------------------------
+-- Per-item GUIDs (Ascension only)
+-------------------------------------------------
+
+-- Stock 3.3.5a has no item GUIDs; Ascension's custom layer adds
+-- GetContainerItemGUID (docs/ASCENSION-API.md section 4). Verified on this client
+-- with `/gbdiag guid`: the value is unique per stack and follows the item across
+-- slot moves, which makes it a valid identity key for per-item locking.
+--
+-- Resolved once at load. On a client without it every caller gets nil, which
+-- makes the lock code fall back to the legacy itemID-wide store automatically --
+-- no feature flag to thread through, no behaviour change off Ascension.
+--
+-- NOT valid for guild bank slots: those pass a tabIndex where a bagID belongs.
+-- Guild bank item records never carry a guid, so they take the fallback path.
+local GetContainerItemGUID_ = _G.GetContainerItemGUID
+local hasItemGUID = type(GetContainerItemGUID_) == "function"
+
+function Utils:GetItemGUID(bagID, slot)
+    if not hasItemGUID or bagID == nil or slot == nil then return nil end
+    return GetContainerItemGUID_(bagID, slot)
+end
+
+-------------------------------------------------
 -- Table Utilities
 -------------------------------------------------
 

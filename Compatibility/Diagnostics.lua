@@ -215,12 +215,161 @@ local function DumpChildren()
     end
 end
 
+--- Probe Ascension's custom GetContainerItemGUID.
+---
+--- docs/ASCENSION-API.md section 4 lists this in Extensions.dll but flags it as
+--- unverified at runtime. Per-item locking is only viable if the GUID (a) exists,
+--- (b) is non-nil for a real item, and (c) survives the item moving to another
+--- slot -- otherwise it is just a dressed-up slot key and buys nothing over the
+--- current itemID scope.
+---
+--- Usage: /gbdiag guid, then SWAP two different items between two occupied slots,
+--- then /gbdiag guid again. A swap is decisive in both directions -- if the guids
+--- stay put it is slot-derived, if they follow their items it is a real identity.
+--- Moving into an empty slot can only ever prove PASS, never FAIL, because the
+--- vacated slot drops out of the scan entirely.
+---
+--- The snapshot is keyed by SLOT, not by guid. That matters: a slot-derived guid
+--- never appears to move -- every guid stays put at its own slot while the items
+--- underneath it shuffle -- which is indistinguishable from "the user moved
+--- nothing" if you only diff guid -> slot. Keying by slot and tracking the itemID
+--- alongside gives the discriminator: a slot whose ITEM changed while its GUID did
+--- not is proof the guid is addressing the slot, not the item.
+local guidSnapshot = nil   -- [bag*1000+slot] = { guid=, itemID= } from the previous run
+
+local function DumpItemGUIDs()
+    line("---- item GUID probe ----")
+
+    local fn = _G.GetContainerItemGUID
+    line("GetContainerItemGUID type: %s", type(fn))
+    if type(fn) ~= "function" then
+        line("VERDICT: ABSENT -- per-instance locking is not possible on this client")
+        guidSnapshot = nil
+        return
+    end
+
+    local Constants = ns.Constants
+    local bagMin = Constants and Constants.PLAYER_BAG_MIN or 0
+    local bagMax = Constants and Constants.PLAYER_BAG_MAX or 4
+
+    local bySlot, byGuid = {}, {}
+    local scanned, withGuid, dupes, shown = 0, 0, 0, 0
+
+    for bag = bagMin, bagMax do
+        local numSlots = C_Container.GetContainerNumSlots(bag) or 0
+        for slot = 1, numSlots do
+            local info = C_Container.GetContainerItemInfo(bag, slot)
+            if info then
+                scanned = scanned + 1
+                local ok, guid = pcall(fn, bag, slot)
+                if not ok then guid = nil end
+                if shown < 10 then
+                    shown = shown + 1
+                    line("  %d:%d itemID=%s guid=%s (%s)",
+                        bag, slot, tostring(info.itemID), tostring(guid), type(guid))
+                end
+                bySlot[bag * 1000 + slot] = { guid = guid, itemID = info.itemID, bag = bag, slot = slot }
+                if guid ~= nil then
+                    withGuid = withGuid + 1
+                    if byGuid[guid] then
+                        dupes = dupes + 1
+                        if dupes <= 3 then
+                            line("  DUPLICATE guid %s at %d:%d and %d:%d",
+                                tostring(guid), byGuid[guid].bag, byGuid[guid].slot, bag, slot)
+                        end
+                    else
+                        byGuid[guid] = { bag = bag, slot = slot, itemID = info.itemID }
+                    end
+                end
+            end
+        end
+    end
+
+    line("occupied slots: %d, with a non-nil guid: %d, duplicate guids: %d", scanned, withGuid, dupes)
+
+    if withGuid == 0 then
+        line("VERDICT: NIL -- the function exists but returns nothing. Per-instance locking not viable.")
+        guidSnapshot = nil
+        return
+    end
+    if dupes > 0 then
+        line("VERDICT: NOT UNIQUE -- two stacks share a guid. Per-instance locking not viable.")
+        guidSnapshot = bySlot
+        return
+    end
+
+    if not guidSnapshot then
+        line("Baseline captured (%d slots). Now SWAP two different items between two", scanned)
+        line("occupied slots (drag A onto B), then run /gbdiag guid again.")
+        line("A swap is decisive both ways; moving into an EMPTY slot can only prove PASS.")
+        guidSnapshot = bySlot
+        return
+    end
+
+    -- Second run. Two independent signals, both keyed off the item actually moving.
+    local itemChangedSlots = 0   -- slots whose occupant changed between runs
+    local slotDerived      = 0   -- ...and whose guid did NOT change  -> guid addresses the slot
+    local guidChangedToo   = 0   -- ...and whose guid DID change      -> consistent with item identity
+    local followedItem     = 0   -- a guid now at a different slot, still on the same itemID -> proof
+
+    for key, was in pairs(guidSnapshot) do
+        local now = bySlot[key]
+        local nowItem = now and now.itemID or nil
+        if nowItem ~= was.itemID then
+            itemChangedSlots = itemChangedSlots + 1
+            local nowGuid = now and now.guid or nil
+            if now and nowGuid == was.guid then
+                slotDerived = slotDerived + 1
+                if slotDerived <= 5 then
+                    line("  SLOT-DERIVED: %d:%d itemID %s -> %s but guid stayed %s",
+                        was.bag, was.slot, tostring(was.itemID), tostring(nowItem), tostring(was.guid))
+                end
+            else
+                guidChangedToo = guidChangedToo + 1
+            end
+        end
+    end
+
+    -- Did any baseline guid turn up at a new slot still carrying the same item?
+    for key, was in pairs(guidSnapshot) do
+        if was.guid ~= nil then
+            local now = byGuid[was.guid]
+            if now and (now.bag ~= was.bag or now.slot ~= was.slot) and now.itemID == was.itemID then
+                followedItem = followedItem + 1
+                if followedItem <= 5 then
+                    line("  FOLLOWED ITEM: guid %s  %d:%d -> %d:%d (itemID %s)",
+                        tostring(was.guid), was.bag, was.slot, now.bag, now.slot, tostring(now.itemID))
+                end
+            end
+        end
+    end
+
+    line("slots whose item changed: %d (guid unchanged: %d, guid changed: %d); guids that followed an item: %d",
+        itemChangedSlots, slotDerived, guidChangedToo, followedItem)
+
+    if itemChangedSlots == 0 and followedItem == 0 then
+        line("VERDICT: NO CHANGE DETECTED -- nothing moved between the two runs.")
+        line("Swap two different items between two occupied slots, then run /gbdiag guid again.")
+    elseif slotDerived > 0 then
+        line("VERDICT: FAIL -- a slot kept its guid while its item changed.")
+        line("The guid addresses the SLOT, not the item. Per-instance locking not viable.")
+    elseif followedItem > 0 then
+        line("VERDICT: PASS -- a guid followed its item to a new slot.")
+        line("Per-instance locking is viable.")
+    else
+        line("VERDICT: INCONCLUSIVE -- items changed slots but no guid followed one.")
+        line("Guids look regenerated on move, which is as unusable as slot-derived.")
+    end
+
+    guidSnapshot = bySlot
+end
+
 -- Bump on every change to this file. Editing a Lua file does not affect the
 -- running session, so a /gbdiag issued before the next /reload silently reports
 -- from the OLD code -- which has already cost a round trip. Stamping the build
 -- into the report makes stale output obvious at a glance instead of something to
 -- reconstruct from file timestamps.
-local DIAG_BUILD = "2026-07-21-h (shim probes parked under hidden parent)"
+local DIAG_BUILD = "2026-08-01-b (item GUID probe keyed by slot, not by guid)"
 
 local function RunDiagnostics()
     report = {}   -- the ONE place a full run clears accumulated output
@@ -474,6 +623,16 @@ SlashCmdList["GUDABAGSDIAG"] = function(arg)
         pcall(DumpChildren)
         GudaBags_Diag = report
         DEFAULT_CHAT_FRAME:AddMessage("|cff00ccff[diag]|r saved to GudaBags_Diag -- /reload to write it")
+        return
+    elseif arg == "guid" then
+        -- Reset only on the baseline run. The baseline and the after-move run are
+        -- one investigation and only the last GudaBags_Diag written reaches disk,
+        -- so the second run must append to keep both halves readable in the file.
+        if not guidSnapshot then report = {} end
+        pcall(DumpItemGUIDs)
+        GudaBags_Diag = report
+        DEFAULT_CHAT_FRAME:AddMessage(
+            "|cff00ccff[diag]|r saved to GudaBags_Diag -- /reload to write it to disk")
         return
     elseif arg == "unblock" then
         report = {}

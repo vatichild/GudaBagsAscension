@@ -527,15 +527,26 @@ local function CreateBagFrame()
     return f
 end
 
+-- Iterate the active pool filtered by owner rather than buttonsBySlot: in category
+-- view with "Group identical items" on, several slots collapse onto one button and
+-- only one of them lands in buttonsBySlot, so slot-keyed iteration silently skips
+-- buttons and their icons don't repaint until the next full refresh. Same owner-
+-- filter pattern as ItemButton:ResetAllAlpha.
 function BagFrame:RefreshPinIcons()
-    for _, button in pairs(buttonsBySlot) do
-        ItemButton:UpdatePinIcon(button)
+    if not frame then return end
+    for button in ItemButton:GetActiveButtons() do
+        if button.owner == frame.container then
+            ItemButton:UpdatePinIcon(button)
+        end
     end
 end
 
 function BagFrame:RefreshLockIcons()
-    for _, button in pairs(buttonsBySlot) do
-        ItemButton:UpdateUserLockIcon(button)
+    if not frame then return end
+    for button in ItemButton:GetActiveButtons() do
+        if button.owner == frame.container then
+            ItemButton:UpdateUserLockIcon(button)
+        end
     end
 end
 
@@ -1329,6 +1340,15 @@ function BagFrame:Hide()
         and not viewingCharacter
         and not SearchBar:HasActiveFilters(frame)
 
+    -- Undo any footer bag-slot hover dim before hiding. The footer widget's
+    -- OnLeave never fires when the frame is hidden out from under the cursor, and
+    -- the fast-reopen path re-shows the retained buttons without repainting them,
+    -- so the dim would otherwise survive the close/open cycle. Flag-gated: this is
+    -- a no-op sweep in the normal case.
+    if frame.container and ItemButton:IsHighlightDimActive(frame.container) then
+        ItemButton:ResetAllAlpha(frame.container)
+    end
+
     frame:Hide()
     -- Reset transient search toggle so next open starts collapsed
     self:ResetSearchToggle()
@@ -1783,7 +1803,13 @@ function BagFrame:IncrementalUpdate(dirtyBags)
                 local linkChanged = button.itemData and newItemData.link ~= button.itemData.link
 
                 if oldItemID == newItemID and not linkChanged then
-                    -- Same item - just check count
+                    -- Same item - just check count.
+                    -- Re-point itemData at the fresh scan record even though we skip
+                    -- SetItem: the old table is a previous scan's snapshot, so its
+                    -- `locked`/`bagID`/`slot` go stale. UpdateLockForItem matches
+                    -- buttons on itemData.bagID/slot, and would otherwise paint the
+                    -- lock overlay onto whichever button still holds the old coords.
+                    button.itemData = newItemData
                     local oldCount = cachedItemCount[slotKey]
                     if oldCount ~= newItemData.count then
                         SetItemButtonCount(button, newItemData.count)
@@ -1928,7 +1954,9 @@ function BagFrame:IncrementalUpdate(dirtyBags)
                         end
                     end
                 elseif newItemData then
-                    -- Same item - only update if count changed (stacking)
+                    -- Same item - only update if count changed (stacking).
+                    -- Re-point itemData: see the note on the category-view fast path.
+                    button.itemData = newItemData
                     local oldCount = cachedItemCount[slotKey]
                     if oldCount ~= newItemData.count then
                         SetItemButtonCount(button, newItemData.count)
@@ -1980,7 +2008,9 @@ function BagFrame:IncrementalUpdate(dirtyBags)
                             end
                         end
                     elseif newItemData then
-                        -- Same item - only update if count changed (stacking)
+                        -- Same item - only update if count changed (stacking).
+                        -- Re-point itemData: see the note on the category-view fast path.
+                        button.itemData = newItemData
                         local oldCount = cachedItemCount[slotKey]
                         if oldCount ~= newItemData.count then
                             SetItemButtonCount(button, newItemData.count)
@@ -2745,7 +2775,9 @@ local function AutoVendorJunk()
         local numSlots = C_Container.GetContainerNumSlots(bagID)
         for slot = 1, numSlots do
             local itemInfo = C_Container.GetContainerItemInfo(bagID, slot)
-            if itemInfo and not Database:IsItemLocked(itemInfo.itemID)
+            -- IsSlotLocked, not IsItemLocked: the user lock is per stack, so an
+            -- unlocked stack of a type the user locked elsewhere is still sellable.
+            if itemInfo and not Database:IsSlotLocked(bagID, slot, itemInfo.itemID)
                 and not (autoLockSets and EquipSets and EquipSets:IsInSet(itemInfo.itemID)) then
                 -- Prefer the scanner's full itemData (rich fields for rule
                 -- evaluation); fall back to a minimal inline build if the

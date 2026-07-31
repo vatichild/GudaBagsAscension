@@ -1645,6 +1645,13 @@ function GuildBankFrame:Hide()
         -- Clear search/chip filters on close
         SearchBar:ClearAllFilters(frame)
 
+        -- Undo any tab-hover dim before hiding — the tab's OnLeave never fires when
+        -- the frame is hidden out from under the cursor, and the retained layout is
+        -- re-shown without repainting. Flag-gated no-op sweep.
+        if frame.container and ItemButton:IsHighlightDimActive(frame.container) then
+            ItemButton:ResetAllAlpha(frame.container)
+        end
+
         frame:Hide()
         -- Reset transient search toggle so next open starts collapsed
         self:ResetSearchToggle()

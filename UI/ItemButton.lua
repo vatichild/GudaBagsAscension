@@ -86,19 +86,65 @@ end
 local function SuppressItemErrors()
 end
 
--- Check if an item is protected from selling/deleting (user-locked or in equipment set)
-local function IsItemProtected(itemID)
-    if not itemID then return false end
-    if Database:IsItemLocked(itemID) then return true end
-    if Database:GetSetting("autoLockSetItems") then
-        local EquipSets = ns:GetModule("EquipmentSets")
-        if EquipSets and EquipSets:IsInSet(itemID)
-           and not Database:IsSetProtectionException(itemID) then
-            return true
-        end
-    end
-    return false
+-- Show a marker icon and its black outline copy in the correct draw order.
+--
+-- Each marker (lock, tracked star, category mark) is two textures on the same draw
+-- layer: a slightly larger black copy for the outline, and the coloured icon on
+-- top. Their stacking was expressed only through the 4th `subLevel` argument of
+-- CreateTexture -- which stock 3.3.5a does not have and silently ignores. That
+-- leaves the client free to order same-layer textures by when they were last
+-- shown, and every call site used to Show() the black copy LAST, putting it over
+-- the icon. Result: markers rendered black instead of gold, intermittently,
+-- depending on which refresh path last touched them.
+--
+-- Showing the outline first makes all three ordering signals agree (creation
+-- order, subLevel hint, show order), so the icon is on top under any of them.
+local function ShowMarkerPair(outline, icon)
+    if outline then outline:Show() end
+    if icon then icon:Show() end
 end
+
+-- Equipment-set protection is itemID-wide by design: a set names item *types*, not
+-- individual stacks, so every copy of a set piece is protected.
+local function IsSetProtected(itemID)
+    if not itemID then return false end
+    if not Database:GetSetting("autoLockSetItems") then return false end
+    local EquipSets = ns:GetModule("EquipmentSets")
+    return (EquipSets and EquipSets:IsInSet(itemID)
+        and not Database:IsSetProtectionException(itemID)) or false
+end
+
+-- Is the item on this button protected from selling/deleting/disenchanting?
+-- Takes the button (not just its itemData) so it can tell a live slot from a
+-- read-only one: a cached character's bagID/slot index the CURRENT character's
+-- bags, so resolving a GUID from them would name the wrong stack. Read-only and
+-- guild-bank buttons therefore use the itemID-wide answer only.
+local function IsItemProtected(button)
+    local itemData = button and button.itemData
+    if not itemData or not itemData.itemID then return false end
+    if button.isReadOnly or itemData.isGuildBank then
+        return Database:IsItemLocked(itemData.itemID) or IsSetProtected(itemData.itemID)
+    end
+    if Database:IsItemLockedFor(itemData) then return true end
+    return IsSetProtected(itemData.itemID)
+end
+
+-- Same question against a live slot, for paths that have (bagID, slot) but no scan
+-- record. Bag and bank slots only -- a guild bank tabIndex is not a bagID.
+local function IsSlotProtected(bagID, slot, itemID)
+    if not itemID then return false end
+    if Database:IsSlotLocked(bagID, slot, itemID) then return true end
+    return IsSetProtected(itemID)
+end
+
+-- Containers whose buttons HighlightBagSlots has dimmed for a footer bag-slot (or
+-- guild-bank tab) hover. The dim is normally undone by the widget's OnLeave ->
+-- ResetAllAlpha, but OnLeave never fires if the frame is hidden while the cursor is
+-- still over the widget -- and the fast-reopen path re-shows those buttons
+-- untouched, so the dim survives the close/open cycle. Frame Hide handlers consult
+-- this so the recovery sweep only runs when that container actually has a dim to
+-- undo. Keyed by container frame; at most one entry per open window.
+local dimmedOwners = {}
 
 -- Protect locked items from disenchant/milling/prospecting without tainting secure click chain
 -- Uses overlay frames on protected buttons that eat clicks while spell targeting is active
@@ -132,7 +178,7 @@ local function CreateSpellOverlay(button)
 end
 
 local function UpdateSpellOverlay(button)
-    if spellTargetingActive and button.itemData and button.itemData.itemID and IsItemProtected(button.itemData.itemID) then
+    if spellTargetingActive and button.itemData and button.itemData.itemID and IsItemProtected(button) then
         local overlay = CreateSpellOverlay(button)
         overlay:SetFrameLevel(button:GetFrameLevel() + 21)
         overlay:Show()
@@ -276,7 +322,7 @@ local function CreateMerchantOverlay(button)
 end
 
 local function UpdateMerchantOverlay(button)
-    if merchantProtectionActive and button.itemData and button.itemData.itemID and IsItemProtected(button.itemData.itemID) then
+    if merchantProtectionActive and button.itemData and button.itemData.itemID and IsItemProtected(button) then
         local overlay = CreateMerchantOverlay(button)
         overlay:SetFrameLevel(button:GetFrameLevel() + 20)
         overlay:Show()
@@ -317,7 +363,25 @@ local function HookDeletePopup(dialogName)
     local originalOnShow = StaticPopupDialogs[dialogName].OnShow
     StaticPopupDialogs[dialogName].OnShow = function(self, ...)
         local cursorType, itemID = GetCursorInfo()
-        if cursorType == "item" and itemID and IsItemProtected(itemID) then
+        -- The item is on the cursor, so there is no scan record to read a GUID
+        -- from. Its source slot stays occupied-but-locked while carried, so
+        -- GetCursorBagSlot finds it and the per-stack lock still resolves. If it
+        -- can't be located, fall back to the itemID-wide check: over-protecting a
+        -- delete is the safe failure, silently allowing one is not.
+        local protected = false
+        if cursorType == "item" and itemID then
+            local BagFrame = ns:GetModule("BagFrame")
+            local srcBag, srcSlot = nil, nil
+            if BagFrame and BagFrame.GetCursorBagSlot then
+                srcBag, srcSlot = BagFrame:GetCursorBagSlot()
+            end
+            if srcBag and srcSlot then
+                protected = IsSlotProtected(srcBag, srcSlot, itemID)
+            else
+                protected = Database:IsItemLocked(itemID) or IsSetProtected(itemID)
+            end
+        end
+        if protected then
             local L = ns.L
             ns:Print(string.format(L["ITEM_LOCKED_CANNOT_DELETE"], select(2, GetItemInfo(itemID)) or ""))
             ClearCursor()
@@ -403,6 +467,7 @@ local function ResetButton(pool, button)
     button.wrapper:SetShown(false)
     button.wrapper:ClearAllPoints()
     button.itemData = nil
+    button.isReadOnly = nil
     button.owner = nil
     button.isEmptySlotButton = nil
     button.isDropTargetButton = nil
@@ -426,6 +491,11 @@ local function ResetButton(pool, button)
     end
 
     -- Clear visual state to prevent texture bleeding
+    -- Alpha MUST be restored here: our marker textures (pin/tracked/equipSet/junk)
+    -- are regions of the button and userLockIcon sits on a child frame, so they all
+    -- inherit button alpha. Search dimming (0.4), bag-slot highlight (0.25) and the
+    -- drop-target tint (0.5) would otherwise ride into the next use of this button.
+    button:SetAlpha(1)
     SetItemButtonTexture(button, nil)
     SetItemButtonCount(button, 0)
     SetItemButtonDesaturated(button, false)
@@ -450,6 +520,8 @@ local function ResetButton(pool, button)
     if button.craftingQualityIcon then button.craftingQualityIcon:Hide() end
     if button.pinIcon then button.pinIcon:Hide() end
     if button.pinIconShadow then button.pinIconShadow:Hide() end
+    if button.userLockIcon then button.userLockIcon:Hide() end
+    if button.userLockIconStroke then button.userLockIconStroke:Hide() end
     if button.searchGlow then button.searchGlow:Hide() end
     if button.dropTargetGlow then
         button.dropTargetGlow.animGroup:Stop()
@@ -1297,7 +1369,17 @@ local function CreateButton(parent)
                             return
                         end
                     end
-                    local isNowLocked = Database:ToggleItemLock(self.itemData.itemID)
+                    -- Per stack, not per item type: ToggleItemLockFor resolves this
+                    -- slot's GUID so only the clicked stack is affected. Guild bank
+                    -- slots keep the itemID-wide lock -- their bagID is a tabIndex,
+                    -- so a GUID lookup would name a stack in the player's own bags.
+                    local isNowLocked
+                    if self.itemData.isGuildBank then
+                        isNowLocked = Database:ToggleItemLock(self.itemData.itemID)
+                    else
+                        isNowLocked = Database:ToggleItemLockFor(
+                            self.itemData.bagID, self.itemData.slot, self.itemData.itemID)
+                    end
                     local L = ns.L
                     if isNowLocked then
                         ns:Print(string.format(L["ITEM_LOCKED"], self.itemData.link or self.itemData.name or ""))
@@ -1888,6 +1970,12 @@ function ItemButton:SetItem(button, itemData, size, isReadOnly)
     if button.craftingQualityIcon then button.craftingQualityIcon:Hide() end
     if button.pinIcon then button.pinIcon:Hide() end
     if button.pinIconShadow then button.pinIconShadow:Hide() end
+    -- Cleared here, not at the end: UpdateUserLockIcon runs last in the real-item
+    -- branch and re-shows these when the item is locked, but the Empty/Soul/Quiver
+    -- and DropTarget pseudo branches below return before reaching it. Without this
+    -- a pseudo slot inherits the lock icon of whatever item the button last showed.
+    if button.userLockIcon then button.userLockIcon:Hide() end
+    if button.userLockIconStroke then button.userLockIconStroke:Hide() end
 
     button.itemData = itemData
     button.isReadOnly = isReadOnly or false
@@ -2179,10 +2267,7 @@ function ItemButton:SetItem(button, itemData, size, isReadOnly)
         if button.trackedIcon then
             local TrackedBar = ns:GetModule("TrackedBar")
             if TrackedBar and TrackedBar:IsTracked(itemData.itemID) then
-                button.trackedIcon:Show()
-                if button.trackedIconShadow then
-                    button.trackedIconShadow:Show()
-                end
+                ShowMarkerPair(button.trackedIconShadow, button.trackedIcon)
             else
                 button.trackedIcon:Hide()
                 if button.trackedIconShadow then
@@ -2230,11 +2315,10 @@ function ItemButton:SetItem(button, itemData, size, isReadOnly)
 
             if markIcon then
                 button.equipSetIcon:SetTexture(markIcon)
-                button.equipSetIcon:Show()
                 if button.equipSetIconShadow then
                     button.equipSetIconShadow:SetTexture(markIcon)
-                    button.equipSetIconShadow:Show()
                 end
+                ShowMarkerPair(button.equipSetIconShadow, button.equipSetIcon)
             else
                 button.equipSetIcon:Hide()
                 if button.equipSetIconShadow then button.equipSetIconShadow:Hide() end
@@ -2424,8 +2508,7 @@ function ItemButton:UpdatePinIcon(button)
     if itemData and itemData.bagID ~= nil and itemData.slot and not button.isReadOnly then
         local Database = ns:GetModule("Database")
         if Database:IsPinnedSlot(itemData.bagID, itemData.slot) then
-            button.pinIcon:Show()
-            if button.pinIconShadow then button.pinIconShadow:Show() end
+            ShowMarkerPair(button.pinIconShadow, button.pinIcon)
             -- Hide category mark icon (pin takes priority in same corner)
             if button.equipSetIcon then button.equipSetIcon:Hide() end
             if button.equipSetIconShadow then button.equipSetIconShadow:Hide() end
@@ -2441,9 +2524,8 @@ function ItemButton:UpdateUserLockIcon(button)
     local itemData = button.itemData
     if itemData and itemData.itemID and not button.isReadOnly then
         local Database = ns:GetModule("Database")
-        if Database:IsItemLocked(itemData.itemID) then
-            button.userLockIcon:Show()
-            if button.userLockIconStroke then button.userLockIconStroke:Show() end
+        if Database:IsItemLockedFor(itemData) then
+            ShowMarkerPair(button.userLockIconStroke, button.userLockIcon)
             UpdateMerchantOverlay(button)
             UpdateSpellOverlay(button)
             return
@@ -2452,8 +2534,7 @@ function ItemButton:UpdateUserLockIcon(button)
             local EquipSets = ns:GetModule("EquipmentSets")
             if EquipSets and EquipSets:IsInSet(itemData.itemID)
                and not Database:IsSetProtectionException(itemData.itemID) then
-                button.userLockIcon:Show()
-                if button.userLockIconStroke then button.userLockIconStroke:Show() end
+                ShowMarkerPair(button.userLockIconStroke, button.userLockIcon)
                 UpdateMerchantOverlay(button)
                 UpdateSpellOverlay(button)
                 return
@@ -2509,6 +2590,18 @@ function ItemButton:SetEmpty(button, bagID, slot, size, isReadOnly, isGuildBank)
     ApplyMasqueAfterSizing(button)
 
     button.slotBackground:SetVertexColor(0.5, 0.5, 0.5, settings.bgAlpha)
+
+    -- Reset dimming/desaturation before painting the empty slot. Ghost slots are
+    -- created straight from SetEmpty on the sort path (UI/BagFrame.lua) with no
+    -- ClearSearchState fixup, so without this a ghost inherits whatever alpha the
+    -- button carried from a search filter, a bag-slot hover, or a drop target.
+    button:SetAlpha(1)
+    SetItemButtonDesaturated(button, false)
+    if button.searchGlow then button.searchGlow:Hide() end
+    if button.dropTargetGlow then
+        button.dropTargetGlow.animGroup:Stop()
+        button.dropTargetGlow:Hide()
+    end
 
     SetItemButtonTexture(button, nil)
     SetItemButtonCount(button, 0)
@@ -2604,6 +2697,7 @@ end
 function ItemButton:HighlightBagSlots(bagID, owner)
     if not buttonPool then return end
     local bgAlpha = Database:GetSetting("bgAlpha") / 100
+    if owner then dimmedOwners[owner] = true end
 
     for button in buttonPool:EnumerateActive() do
         -- Only affect buttons belonging to the specified owner (if provided)
@@ -2627,11 +2721,20 @@ function ItemButton:HighlightBagSlots(bagID, owner)
     end
 end
 
+--- True while a footer bag-slot (or guild-bank tab) hover has left this container's
+--- buttons dimmed. Frame Hide handlers use this to skip the ResetAllAlpha sweep in
+--- the common (undimmed) case.
+function ItemButton:IsHighlightDimActive(owner)
+    if not owner then return next(dimmedOwners) ~= nil end
+    return dimmedOwners[owner] or false
+end
+
 function ItemButton:ClearHighlightedSlots(parentFrame)
     if not buttonPool then return end
     local SearchBar = ns:GetModule("SearchBar")
     local hasSearch = (SearchBar and parentFrame) and SearchBar:HasActiveFilters(parentFrame) or false
     local bgAlpha = Database:GetSetting("bgAlpha") / 100
+    wipe(dimmedOwners)  -- this sweep is pool-wide, not owner-scoped
 
     for button in buttonPool:EnumerateActive() do
         if hasSearch then
@@ -2791,6 +2894,11 @@ end
 function ItemButton:ResetAllAlpha(owner)
     if not buttonPool then return end
     local bgAlpha = Database:GetSetting("bgAlpha") / 100
+    if owner then
+        dimmedOwners[owner] = nil
+    else
+        wipe(dimmedOwners)
+    end
 
     for button in buttonPool:EnumerateActive() do
         -- Only affect buttons belonging to the specified owner (if provided)
@@ -2848,9 +2956,8 @@ function ItemButton:UpdateLockForItem(bagID, slotID)
             end
 
             -- Refresh user lock icon using live API data (itemData may be stale)
-            if itemInfo and itemInfo.itemID and IsItemProtected(itemInfo.itemID) then
-                if button.userLockIcon then button.userLockIcon:Show() end
-                if button.userLockIconStroke then button.userLockIconStroke:Show() end
+            if itemInfo and itemInfo.itemID and IsSlotProtected(bagID, slotID, itemInfo.itemID) then
+                ShowMarkerPair(button.userLockIconStroke, button.userLockIcon)
             else
                 if button.userLockIcon then button.userLockIcon:Hide() end
                 if button.userLockIconStroke then button.userLockIconStroke:Hide() end
