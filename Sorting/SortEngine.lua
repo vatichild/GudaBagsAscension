@@ -69,6 +69,39 @@ local pendingLockSlots = {}  -- flat array: {bagID1, slot1, bagID2, slot2, ...}
 local pendingLockCount = 0   -- number of pairs (actual array length = count * 2)
 local pendingLockSet = {}    -- set: bagID*1000+slot → true (O(1) dependency check)
 
+-- Moves already issued during this restack, keyed by all four coordinates.
+--
+-- THE fix for the permanently locked item. The client applies the two ends of a
+-- move at different times: logs show a destination updated within 20ms while the
+-- source still reported its old stack. Re-planning from that half-applied view
+-- produces the SAME move again, and the duplicate is invalid -- the server drops
+-- it without a reply and the slot stays locked until relog.
+--
+-- Waiting it out does not work, and both attempts are recorded here so nobody
+-- repeats them: isLocked reads clear while contents are still stale, and
+-- BAG_UPDATE fires for the end that HAS updated. Neither means "settled".
+--
+-- So do not detect settling at all -- just refuse to issue a move twice. A merge
+-- that succeeded never needs repeating, and amountToMove is sized to fit in one
+-- go, so nothing legitimate is lost.
+--
+-- Numeric key, no string building: slots are bagID*1000+slot (bagID <= 11,
+-- slot <= 36, so under 11036) and the pair packs into one number.
+local restackIssued = {}
+
+local function MoveKey(sourceBag, sourceSlot, targetBag, targetSlot)
+    return (sourceBag * 1000 + sourceSlot) * 100000 + (targetBag * 1000 + targetSlot)
+end
+
+-- Every slot touched across the WHOLE restack, for diagnostics only.
+--
+-- pendingLockSet is wiped at the start of each pass, so a "is anything still
+-- locked?" check at finish only ever inspected the LAST pass's slots -- and a
+-- final pass that moves nothing wipes it to empty, making the check report a
+-- confident zero while an earlier pass's slot was still locked. That false
+-- negative sent one investigation down the wrong path entirely.
+local restackTouched = {}
+
 local function ClearPendingLocks()
     pendingLockCount = 0
     wipe(pendingLockSet)
@@ -80,6 +113,7 @@ local function AddPendingLock(bagID, slot)
     pendingLockSlots[idx + 2] = slot
     pendingLockCount = pendingLockCount + 1
     pendingLockSet[bagID * 1000 + slot] = true
+    restackTouched[bagID * 1000 + slot] = { bagID = bagID, slot = slot }
 end
 
 -------------------------------------------------
@@ -102,6 +136,12 @@ local function RLogReset()
     restackLogCount = 0
     restackLogStart = GetTime()
     wipe(restackLog)
+    -- Point the saved variable AT the live table rather than copying into it on
+    -- completion. A restack that stalls never reaches its completion handler, so
+    -- a copy-on-finish scheme writes nothing and a /reload during the stall
+    -- silently preserves the PREVIOUS run's log -- which reads exactly like "the
+    -- new code never ran" and cost two round trips to see through.
+    _G.GudaBags_Diag = restackLog
 end
 
 local function RLog(fmt, ...)
@@ -125,33 +165,21 @@ local function SlotState(bagID, slot)
         info.isLocked and " LOCKED" or "")
 end
 
---- Report every slot in the pending wait-list that is still locked.
+--- Report every slot this restack has touched that is still locked.
+--- Walks restackTouched, NOT the pending list -- the pending list is wiped per
+--- pass and would report a confident zero for a slot an earlier pass stranded.
 --- @return number how many are still locked
 local function LogPendingLockState(label)
     local stillLocked = 0
-    for i = 0, pendingLockCount - 1 do
-        local bagID = pendingLockSlots[i * 2 + 1]
-        local slot = pendingLockSlots[i * 2 + 2]
-        local info = C_Container_GetContainerItemInfo(bagID, slot)
+    for _, entry in pairs(restackTouched) do
+        local info = C_Container_GetContainerItemInfo(entry.bagID, entry.slot)
         if info and info.isLocked then
             stillLocked = stillLocked + 1
-            RLog("  %s: %d:%d still locked (%s)", label, bagID, slot, SlotState(bagID, slot))
+            RLog("  %s: %d:%d still locked (%s)", label, entry.bagID, entry.slot,
+                SlotState(entry.bagID, entry.slot))
         end
     end
     return stillLocked
-end
-
---- Copy the log into the GudaBags_Diag saved variable so it reaches disk on the
---- next /reload or logout. Automatic: a user hitting this bug should not also
---- have to remember a command, and the chat window cannot be copied out of.
---- GudaBags_Diag is a plain array of strings (see Compatibility\Diagnostics.lua),
---- so the shape matches what /gbdiag already writes.
-local function PersistRestackLog()
-    local out = {}
-    for i = 1, restackLogCount do
-        out[i] = restackLog[i]
-    end
-    _G.GudaBags_Diag = out
 end
 
 --- @return table log lines, @return number count
@@ -166,7 +194,6 @@ end
 --- bug, not a move bug, and nothing else can tell those two apart.
 function SortEngine:LogRestack(fmt, ...)
     RLog(fmt, ...)
-    PersistRestackLog()
 end
 
 -- Performance: Cache computed sort keys by itemID across passes
@@ -1280,7 +1307,17 @@ local function ConsolidateStacks(bagIDs, bagFamilies)
                                     local sourceInfo = C_Container_GetContainerItemInfo(source.bagID, source.slot)
                                     local targetInfo = C_Container_GetContainerItemInfo(target.bagID, target.slot)
 
-                                    if sourceInfo and targetInfo and not sourceInfo.isLocked and not targetInfo.isLocked then
+                                    local moveKey = MoveKey(source.bagID, source.slot,
+                                                            target.bagID, target.slot)
+
+                                    if restackIssued[moveKey] then
+                                        -- Already sent this exact move. Seeing it planned again
+                                        -- means the client has only applied one end so far; the
+                                        -- move is in flight, not missing.
+                                        RLog("skip duplicate %d:%d -> %d:%d (already issued)",
+                                            target.bagID, target.slot, source.bagID, source.slot)
+                                    elseif sourceInfo and targetInfo
+                                        and not sourceInfo.isLocked and not targetInfo.isLocked then
                                         -- PickupContainerItem SWAPS the cursor with a slot; it is
                                         -- not "drop here". Every step below therefore has to know
                                         -- what is on the cursor, and this used to check nothing at
@@ -1313,6 +1350,7 @@ local function ConsolidateStacks(bagIDs, bagFamilies)
                                         -- one leaves a locked slot nobody is waiting for, which is
                                         -- the whole bug.
                                         AddPendingLock(target.bagID, target.slot)
+                                        restackIssued[moveKey] = true
 
                                         -- THE important check. If the pickup/split was refused the
                                         -- cursor is still empty, and the second call below would
@@ -1390,7 +1428,13 @@ local function RestackRouteSpecialized(bagIDs)
 
         -- Verify the world still matches the plan: source still holds the expected item,
         -- target is still empty, and neither slot is locked from a prior pickup.
-        if srcInfo and srcInfo.itemID == move.expectedItemID and not srcInfo.isLocked
+        local moveKey = MoveKey(move.sourceBag, move.sourceSlot,
+                                move.targetBag, move.targetSlot)
+
+        if restackIssued[moveKey] then
+            RLog("skip duplicate route %d:%d -> %d:%d (already issued)",
+                move.sourceBag, move.sourceSlot, move.targetBag, move.targetSlot)
+        elseif srcInfo and srcInfo.itemID == move.expectedItemID and not srcInfo.isLocked
            and (not tgtInfo or not tgtInfo.itemID) then
             -- Same three-stage cursor discipline as ConsolidateStacks above.
             -- Routing is the likeliest restack move to be refused, because it
@@ -1406,6 +1450,7 @@ local function RestackRouteSpecialized(bagIDs)
             C_Container_PickupContainerItem(move.sourceBag, move.sourceSlot)
             -- Touched, so wait on it regardless of outcome -- see ConsolidateStacks.
             AddPendingLock(move.sourceBag, move.sourceSlot)
+            restackIssued[moveKey] = true
 
             if GetCursorInfo() then
                 C_Container_PickupContainerItem(move.targetBag, move.targetSlot)
@@ -1861,10 +1906,83 @@ local restackDraining = false
 local restackDeadline = 0
 local RESTACK_TIMEOUT = 30
 
+-- Contents-changed gate.
+--
+-- isLocked is NOT a "the move landed" signal on this client. A /gbdiag restack
+-- log caught it exactly: a move from 1:6 into 0:9 reported ok, and 0.16s later
+-- every pending slot read UNLOCKED while the target slot still held its old
+-- stack -- only the destination had updated. Re-planning from that half-applied
+-- view produced the SAME move a second time, and the duplicate is invalid: the
+-- server drops it without a reply and the slot stays locked forever. That is the
+-- permanently grey item, and no amount of lock-waiting can prevent it because
+-- the locks genuinely were clear.
+--
+-- So a pass that moved anything additionally waits for the client to say the
+-- bags actually changed. Event-driven, which is also what Rule 4 asks for.
+local restackAwaitingUpdate = false
+local restackBagsDirty = false
+local restackUpdateWaitUntil = 0
+local RESTACK_UPDATE_WAIT = 1.0
+
+-- Stamped into the first line of every restack log. Bump it when changing how
+-- the restack decides anything: two runs of different builds produced identical
+-- logs once, and it cost a round trip to notice the second one was simply the
+-- first re-saved because no new restack had happened.
+local RESTACK_BUILD = "dedupe-moves-4"
+
+-- Quiet period before the first pass.
+--
+-- A restack fired immediately after the player has been moving items by hand can
+-- start while the client still has an unconfirmed operation in flight -- the
+-- reported symptom is splitting a stack, dropping it in an empty slot, and the
+-- item not appearing straight away. Planning against that half-applied view, and
+-- then moving the very slots it concerns, gets the server's late reply applied to
+-- a slot we have since changed, and it lands as a lock that appears AFTER the
+-- restack has finished and repainted clean.
+--
+-- So: refuse to start until nothing in the target bags is locked and the client
+-- has stopped sending BAG_UPDATE for a moment. The watchdog still bounds it.
+local restackLastBagUpdate = 0
+local RESTACK_SETTLE_QUIET = 0.4
+-- Which phase the settle gate hands off to: "route" for bags, "consolidate" for
+-- the bank variants, which have never routed.
+local restackAfterSettle = "route"
+local restackSettleDeadline = 0
+local restackSettleLogged = false
+local RESTACK_SETTLE_MAX = 2.0
+
 -- The one teardown path for every way a restack can end: finished, drained,
 -- timed out or cancelled by combat. restackInProgress is cleared BEFORE the
 -- callback deliberately -- UI\BagFrame.lua's StartLockWatch refuses to run while
 -- IsRestacking() is true, and the callback is exactly where it needs to.
+-- Created before FinishRestack because that function unregisters BAG_UPDATE on
+-- it; a local declared later would simply be nil inside the closure.
+local restackFrame = CreateFrame("Frame")
+restackFrame:SetScript("OnEvent", function(_, event)
+    if event == "BAG_UPDATE" then
+        restackBagsDirty = true
+        -- Only the quiet timer moves here. The settle DEADLINE must not, or a
+        -- steady trickle of bag updates would push it forward forever and the
+        -- gate would never expire.
+        restackLastBagUpdate = GetTime()
+    end
+end)
+
+--- Is any slot in these bags locked? Unlike AnyItemsLocked this looks at the
+--- whole bag, not just our own pending list -- before we start, a lock is
+--- someone else's in-flight operation and is exactly what we must wait out.
+local function AnyBagSlotLocked(bagIDs)
+    for _, bagID in ipairs(bagIDs or {}) do
+        for slot = 1, (C_Container_GetContainerNumSlots(bagID) or 0) do
+            local info = C_Container_GetContainerItemInfo(bagID, slot)
+            if info and info.isLocked then
+                return true, bagID, slot
+            end
+        end
+    end
+    return false
+end
+
 local function FinishRestack(reason)
     -- The single most useful line in the log: which slots are STILL locked at the
     -- moment we hand control back. Anything listed here is what the user will see
@@ -1873,7 +1991,6 @@ local function FinishRestack(reason)
     local stuck = LogPendingLockState("FINISH")
     RLog("finish (%s): passes=%d pendingSlots=%d stillLocked=%d",
         reason or "done", restackPassCount, pendingLockCount, stuck)
-    PersistRestackLog()
 
     -- Sample again shortly afterwards. A lock that releases on its own within a
     -- second or two is a timing problem in this addon; one that is still set is a
@@ -1894,13 +2011,14 @@ local function FinishRestack(reason)
             end
         end
         RLog("+2s recheck: %d slot(s) locked", locked)
-        PersistRestackLog()
     end)
 
     restackInProgress = false
     restackDraining = false
+    restackAwaitingUpdate = false
     restackPhase = nil
     restackPassCount = 0
+    restackFrame:UnregisterEvent("BAG_UPDATE")
     ClearPendingLocks()
     UnmutePickupSounds()
     -- Restack never reset this; only the sort path did. Harmless on 3.3.5a where
@@ -1922,7 +2040,6 @@ local function FinishRestack(reason)
     if callback then callback() end
 end
 
-local restackFrame = CreateFrame("Frame")
 restackFrame:SetScript("OnUpdate", function(self, elapsed)
     if not restackInProgress then return end
 
@@ -1960,11 +2077,63 @@ restackFrame:SetScript("OnUpdate", function(self, elapsed)
         return
     end
 
+    -- Locks say the last batch settled, but the container contents may not have
+    -- caught up yet -- see RESTACK_UPDATE_WAIT. Planning against a half-applied
+    -- view is what re-issues a move that has already happened.
+    if restackAwaitingUpdate then
+        if restackBagsDirty then
+            restackAwaitingUpdate = false
+        elseif now < restackUpdateWaitUntil then
+            return
+        else
+            -- No BAG_UPDATE arrived. Proceed rather than stall: the per-move
+            -- guards still re-read each slot, and the watchdog still bounds us.
+            RLog("no BAG_UPDATE within %.1fs, proceeding anyway", RESTACK_UPDATE_WAIT)
+            restackAwaitingUpdate = false
+        end
+    end
+
     -- Passes are done and the final batch's locks have now drained (the gate
     -- above fell through). Only now may the caller rescan -- doing it earlier is
     -- what baked isLocked=true into the scan and painted items grey.
     if restackDraining then
         FinishRestack("drained")
+        return
+    end
+
+    -- Phase 0: wait for the client to be quiet before planning anything. See
+    -- RESTACK_SETTLE_QUIET -- starting on top of someone else's in-flight
+    -- operation is how a lock turns up after we have already finished.
+    if restackPhase == "settle" then
+        -- Bounded. A slot stranded by an earlier bug stays locked until relog, and
+        -- waiting on it would stall every future restack -- turning one stuck item
+        -- into a dead feature. Past the deadline, start anyway and say so: the
+        -- per-move guards skip locked slots individually.
+        local settleExpired = now > restackSettleDeadline
+        local locked, lockedBag, lockedSlot = AnyBagSlotLocked(restackBagIDs)
+
+        if locked and not settleExpired then
+            if not restackSettleLogged then
+                restackSettleLogged = true
+                RLog("settle: waiting, %d:%d is locked (%s)",
+                    lockedBag, lockedSlot, SlotState(lockedBag, lockedSlot))
+            end
+            restackNextPassTime = now + lockWaitTime
+            return
+        end
+        if not settleExpired and now - restackLastBagUpdate < RESTACK_SETTLE_QUIET then
+            restackNextPassTime = now + lockWaitTime
+            return
+        end
+        if locked then
+            RLog("settle: TIMED OUT with %d:%d still locked -- pre-existing stuck slot, "
+                .. "starting anyway (relog clears it)", lockedBag, lockedSlot)
+        end
+        -- Hand off to whichever phase this entry point actually wanted. Bags
+        -- route specialised items first; the bank variants skip straight to
+        -- consolidating, as they always have.
+        RLog("settle: bags quiet, starting at %s", restackAfterSettle)
+        restackPhase = restackAfterSettle
         return
     end
 
@@ -1980,6 +2149,11 @@ restackFrame:SetScript("OnUpdate", function(self, elapsed)
         -- consolidate pass must not run against slots that are still settling.
         if pendingLockCount > 0 then
             restackNextPassTime = now + lockWaitTime
+        end
+        if routed > 0 then
+            restackAwaitingUpdate = true
+            restackBagsDirty = false
+            restackUpdateWaitUntil = now + RESTACK_UPDATE_WAIT
         end
         return
     end
@@ -2006,6 +2180,13 @@ restackFrame:SetScript("OnUpdate", function(self, elapsed)
         else
             FinishRestack("converged")
         end
+    elseif moves > 0 then
+        -- More passes to come, and this one changed the bags. Do not re-plan
+        -- until the client confirms the change, or the next pass will re-issue
+        -- a move that has already been applied at one end.
+        restackAwaitingUpdate = true
+        restackBagsDirty = false
+        restackUpdateWaitUntil = now + RESTACK_UPDATE_WAIT
     end
 end)
 
@@ -2021,11 +2202,23 @@ function SortEngine:RestackBags(callback)
     restackCallback = callback
     restackPassCount = 0
     restackNextPassTime = 0
-    restackPhase = "route"
+    restackPhase = "settle"
+    restackAfterSettle = "route"
+    wipe(restackTouched)
+    wipe(restackIssued)
     restackDraining = false
     restackDeadline = GetTime() + RESTACK_TIMEOUT
+    restackAwaitingUpdate = false
+    restackBagsDirty = false
+    -- Seed the quiet timer to NOW: any BAG_UPDATE from the action that
+    -- prompted this restack fired before we registered, so an unseeded
+    -- value would let the settle gate pass instantly.
+    restackLastBagUpdate = GetTime()
+    restackSettleDeadline = GetTime() + RESTACK_SETTLE_MAX
+    restackSettleLogged = false
+    restackFrame:RegisterEvent("BAG_UPDATE")
     RLogReset()
-    RLog("RestackBags start: bags=%s", table.concat(restackBagIDs, ","))
+    RLog("RestackBags start: bags=%s | build=%s updateGate=%.1fs timeout=%ds", table.concat(restackBagIDs, ","), RESTACK_BUILD, RESTACK_UPDATE_WAIT, RESTACK_TIMEOUT)
 
     MutePickupSounds()
     return true
@@ -2048,11 +2241,23 @@ function SortEngine:RestackBank(callback)
     restackCallback = callback
     restackPassCount = 0
     restackNextPassTime = 0
-    restackPhase = "consolidate"
+    restackPhase = "settle"
+    restackAfterSettle = "consolidate"
+    wipe(restackTouched)
+    wipe(restackIssued)
     restackDraining = false
     restackDeadline = GetTime() + RESTACK_TIMEOUT
+    restackAwaitingUpdate = false
+    restackBagsDirty = false
+    -- Seed the quiet timer to NOW: any BAG_UPDATE from the action that
+    -- prompted this restack fired before we registered, so an unseeded
+    -- value would let the settle gate pass instantly.
+    restackLastBagUpdate = GetTime()
+    restackSettleDeadline = GetTime() + RESTACK_SETTLE_MAX
+    restackSettleLogged = false
+    restackFrame:RegisterEvent("BAG_UPDATE")
     RLogReset()
-    RLog("RestackBank start: bags=%s", table.concat(restackBagIDs, ","))
+    RLog("RestackBank start: bags=%s | build=%s updateGate=%.1fs timeout=%ds", table.concat(restackBagIDs, ","), RESTACK_BUILD, RESTACK_UPDATE_WAIT, RESTACK_TIMEOUT)
 
     MutePickupSounds()
     return true
@@ -2079,11 +2284,23 @@ function SortEngine:RestackWarbandBank(callback)
     restackCallback = callback
     restackPassCount = 0
     restackNextPassTime = 0
-    restackPhase = "consolidate"
+    restackPhase = "settle"
+    restackAfterSettle = "consolidate"
+    wipe(restackTouched)
+    wipe(restackIssued)
     restackDraining = false
     restackDeadline = GetTime() + RESTACK_TIMEOUT
+    restackAwaitingUpdate = false
+    restackBagsDirty = false
+    -- Seed the quiet timer to NOW: any BAG_UPDATE from the action that
+    -- prompted this restack fired before we registered, so an unseeded
+    -- value would let the settle gate pass instantly.
+    restackLastBagUpdate = GetTime()
+    restackSettleDeadline = GetTime() + RESTACK_SETTLE_MAX
+    restackSettleLogged = false
+    restackFrame:RegisterEvent("BAG_UPDATE")
     RLogReset()
-    RLog("RestackWarbandBank start: bags=%s", table.concat(restackBagIDs, ","))
+    RLog("RestackWarbandBank start: bags=%s | build=%s updateGate=%.1fs timeout=%ds", table.concat(restackBagIDs, ","), RESTACK_BUILD, RESTACK_UPDATE_WAIT, RESTACK_TIMEOUT)
 
     MutePickupSounds()
     return true
