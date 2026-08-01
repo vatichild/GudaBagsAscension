@@ -45,7 +45,8 @@ There are 22 built in categories, and you can change all of them:
 ### Search and filters
 
 - Start typing in the search box and only matching items stay on screen.
-- Filter chips sit under the search box. Filter by quality, by item type, or by tags like BoE and recently picked up. Click a chip to turn it on or off.
+- Filter chips sit under the search box. Filter by quality, by item type, or by tags like BoE, recently picked up, and Mog (gear whose appearance you can still collect). Click a chip to turn it on or off.
+- Every chip is also a search word, so you can type `mog` or `boe` straight into the box and combine it with the rest of the query.
 
 ---
 

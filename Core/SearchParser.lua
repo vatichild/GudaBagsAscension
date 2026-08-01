@@ -143,7 +143,8 @@ function SearchParser:ParseSearchInput(text)
         -- Check standalone keywords first
         if tokenLower == "boe" or tokenLower == "bop" or tokenLower == "quest"
             or tokenLower == "new" or tokenLower == "usable" or tokenLower == "junk"
-            or tokenLower == "openable" or tokenLower == "learnable" then
+            or tokenLower == "openable" or tokenLower == "learnable"
+            or tokenLower == "mog" then
             table.insert(result.keywords, tokenLower)
             handled = true
         end
@@ -309,6 +310,13 @@ function SearchParser:MatchKeyword(keyword, itemData, context)
         -- Recipe item class (recipes/patterns/plans/formulae/schematics/manuals).
         -- Uses classID (locale-independent) rather than the localized itemType string.
         return itemData.classID == 9
+
+    elseif keyword == "mog" then
+        -- Gear whose appearance can still be collected. Same flag that drives the
+        -- transmog dot, set from the tooltip during the scanner's single pass
+        -- (Data\ItemScanner.lua) -- so this costs nothing extra here and can
+        -- never disagree with the marker.
+        return itemData.canCollectAppearance == true
     end
 
     return false

@@ -61,6 +61,9 @@ local SPECIAL_CHIPS = {
     {key = "new", localeKey = "CHIP_SPECIAL_NEW"},
     {key = "openable", localeKey = "CHIP_SPECIAL_OPENABLE"},
     {key = "learnable", localeKey = "CHIP_SPECIAL_LEARNABLE"},
+    -- Gear whose appearance can still be collected -- the same signal as the
+    -- transmog dot (Data\ItemScanner.lua). Ascension only.
+    {key = "mog", localeKey = "CHIP_SPECIAL_MOG"},
 }
 
 -------------------------------------------------
