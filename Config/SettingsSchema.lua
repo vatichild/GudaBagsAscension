@@ -220,6 +220,11 @@ function SettingsSchema.GetIcons()
             { type = "checkbox", key = "showCharges",  label = L["SETTINGS_SHOW_CHARGES"],   tooltip = L["SETTINGS_SHOW_CHARGES_TIP"] },
             { type = "checkbox", key = "showBoeLabel", label = L["SETTINGS_SHOW_BOE_LABEL"], tooltip = L["SETTINGS_SHOW_BOE_LABEL_TIP"] },
         }},
+
+        -- Row 6 - Transmog
+        { type = "row", children = {
+            { type = "checkbox", key = "markTransmog", label = L["SETTINGS_MARK_TRANSMOG"], tooltip = L["SETTINGS_MARK_TRANSMOG_TIP"] },
+        }},
     }
 end
 

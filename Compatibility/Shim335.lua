@@ -301,8 +301,28 @@ do
             frame.CloseButton = close
         end
 
-        local title = frame:CreateFontString(name and (name .. "TitleText") or nil,
-                                             "ARTWORK", "GameFontNormal")
+        -- The title gets its OWN child frame instead of living on the popup.
+        --
+        -- Core\Theme.lua's retail theme adds a metal frame (EnsureMetalFrame) as a
+        -- child at the SAME frame level as the popup, and its top bar is an OVERLAY
+        -- texture. Regions of same-level frames sort by draw layer, so an ARTWORK
+        -- FontString on the popup itself always loses to that band -- the settings
+        -- and category-editor titles were drawn behind the retail title bar.
+        -- A child frame can be raised above the metal; Core\Theme.lua's
+        -- ApplyPopupTheme does that (the popup's own level is only set after
+        -- construction, so the level cannot be fixed here).
+        --
+        -- EnableMouse(false): the settings popup puts an invisible drag region over
+        -- the same 24px band (UI\SettingsPopup.lua), which must keep its clicks.
+        local titleHost = _CreateFrame("Frame", nil, frame)
+        titleHost:EnableMouse(false)
+        titleHost:SetPoint("TOPLEFT", frame, "TOPLEFT", 0, 0)
+        titleHost:SetPoint("TOPRIGHT", frame, "TOPRIGHT", 0, 0)
+        titleHost:SetHeight(30)
+        frame.TitleHost = titleHost
+
+        local title = titleHost:CreateFontString(name and (name .. "TitleText") or nil,
+                                                 "OVERLAY", "GameFontNormal")
         title:SetPoint("TOP", frame, "TOP", 0, -13)
         frame.TitleText = title
 

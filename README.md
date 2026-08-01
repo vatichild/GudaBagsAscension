@@ -139,6 +139,7 @@ Type `/gb config` or click the gear icon.
 - Mark items you can't use
 - Gray out junk, and optionally white gear too
 - Mark items that belong to an equipment set
+- Mark transmog: a purple dot on gear whose appearance you can still collect, so you don't vendor a look you haven't got yet
 
 ### Layout
 

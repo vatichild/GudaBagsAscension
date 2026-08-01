@@ -178,6 +178,10 @@ Constants.COLORS = {
     WHITE = {1.00, 1.00, 1.00},
     QUEST = {1.00, 0.80, 0.00},  -- Quest item golden yellow
     QUEST_STARTER = {1.00, 0.60, 0.00},  -- Quest starter orange
+    -- Transmog dot. Brighter than the epic quality purple (0.64, 0.21, 0.93) on
+    -- purpose: the two are never the same shape, but a 11px dot needs the extra
+    -- lift to read against dark item art.
+    TRANSMOG = {0.78, 0.36, 1.00},
 }
 
 Constants.FRAME = {
@@ -314,6 +318,7 @@ Constants.DEFAULTS = {
     showItemLevel = true,
     showCharges = true,
     showBoeLabel = true,  -- Show "BoE" text on unbound bind-on-equip items, colored by item quality
+    markTransmog = true,  -- Purple dot on equippable gear that can be transmogrified (Ascension only)
     reverseStackSort = false,
     sortRightToLeft = false,
     smoothSort = false,  -- Spread sort moves across frames to avoid stuttering

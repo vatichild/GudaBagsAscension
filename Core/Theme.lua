@@ -493,66 +493,54 @@ local CLOSE_TEXCOORDS = {
 -- .tga: the shipped redbutton2x.blp is BLP compression type 3, unreadable pre-Cata.
 local CLOSE_TEXTURE = "Interface\\AddOns\\GudaBags\\Assets\\Themes\\retail\\redbutton2x.tga"
 
+-- Stock UIPanelCloseButton art, i.e. what the template assigns at creation.
+local CLOSE_STOCK = {
+    normal    = "Interface\\Buttons\\UI-Panel-MinimizeButton-Up",
+    pushed    = "Interface\\Buttons\\UI-Panel-MinimizeButton-Down",
+    highlight = "Interface\\Buttons\\UI-Panel-MinimizeButton-Highlight",
+}
+
+-- Assign a button state texture BY PATH, then fix up the texture it produced.
+--
+-- Everything here is deliberately path-based and stateless. The previous version
+-- saved the template's texture OBJECTS on the button and re-assigned them when
+-- leaving the metal theme -- but assigning a new normal texture destroys the one
+-- it replaces, so the saved references were dangling by the time they were
+-- restored: switching retail -> guda left the bag header with an alpha-0 metal
+-- texture and no close button at all. Nothing is cached across theme switches
+-- now, so there is also no per-switch texture leak.
+local function SetStateTexture(btn, setter, getter, path, coords, blend)
+    btn[setter](btn, path)
+    local tex = btn[getter](btn)
+    if not tex then return end
+    tex:SetAllPoints(btn)
+    tex:SetTexCoord(unpack(coords or {0, 1, 0, 1}))
+    tex:SetAlpha(1)
+    if blend then tex:SetBlendMode(blend) end
+end
+
 local function StyleCloseButton(btn, useMetal)
+    useMetal = useMetal and true or false
+
+    -- ApplyHeaderButtons runs on every header refresh, not just on theme change,
+    -- so only touch the textures when the mode actually flips.
+    if btn._closeStyleMetal ~= useMetal then
+        local art = useMetal and CLOSE_TEXTURE or nil
+        SetStateTexture(btn, "SetNormalTexture", "GetNormalTexture",
+                        art or CLOSE_STOCK.normal, useMetal and CLOSE_TEXCOORDS.normal)
+        SetStateTexture(btn, "SetPushedTexture", "GetPushedTexture",
+                        art or CLOSE_STOCK.pushed, useMetal and CLOSE_TEXCOORDS.pushed)
+        -- The stock template declares its highlight alphaMode="ADD" too, so ADD
+        -- is right in both themes -- without it the hover glow renders as a
+        -- flat opaque square over the button.
+        SetStateTexture(btn, "SetHighlightTexture", "GetHighlightTexture",
+                        art or CLOSE_STOCK.highlight, useMetal and CLOSE_TEXCOORDS.highlight,
+                        "ADD")
+        btn._closeStyleMetal = useMetal
+    end
+
     if useMetal then
-        if not btn._metalStyled then
-            -- Save original textures
-            btn._origNormal = btn:GetNormalTexture()
-            btn._origPushed = btn:GetPushedTexture()
-            btn._origHighlight = btn:GetHighlightTexture()
-
-            -- Hide original textures
-            if btn._origNormal then btn._origNormal:SetAlpha(0) end
-            if btn._origPushed then btn._origPushed:SetAlpha(0) end
-            if btn._origHighlight then btn._origHighlight:SetAlpha(0) end
-
-            -- Create retail-style textures
-            local normal = btn:CreateTexture(nil, "BORDER")
-            normal:SetTexture(CLOSE_TEXTURE)
-            normal:SetAllPoints(btn)
-            normal:SetTexCoord(unpack(CLOSE_TEXCOORDS.normal))
-            btn:SetNormalTexture(normal)
-            btn._metalNormal = normal
-
-            local pushed = btn:CreateTexture(nil, "BORDER")
-            pushed:SetTexture(CLOSE_TEXTURE)
-            pushed:SetAllPoints(btn)
-            pushed:SetTexCoord(unpack(CLOSE_TEXCOORDS.pushed))
-            btn:SetPushedTexture(pushed)
-            btn._metalPushed = pushed
-
-            local hl = btn:CreateTexture(nil, "HIGHLIGHT")
-            hl:SetTexture(CLOSE_TEXTURE)
-            hl:SetAllPoints(btn)
-            hl:SetTexCoord(unpack(CLOSE_TEXCOORDS.highlight))
-            hl:SetBlendMode("ADD")
-            btn:SetHighlightTexture(hl)
-            btn._metalHighlight = hl
-
-            btn._metalStyled = true
-        end
         btn:SetSize(20, 20)
-    elseif btn._metalStyled then
-        -- Hide metal textures
-        if btn._metalNormal then btn._metalNormal:SetAlpha(0) end
-        if btn._metalPushed then btn._metalPushed:SetAlpha(0) end
-        if btn._metalHighlight then btn._metalHighlight:SetAlpha(0) end
-
-        -- Restore original textures
-        if btn._origNormal then
-            btn._origNormal:SetAlpha(1)
-            btn:SetNormalTexture(btn._origNormal)
-        end
-        if btn._origPushed then
-            btn._origPushed:SetAlpha(1)
-            btn:SetPushedTexture(btn._origPushed)
-        end
-        if btn._origHighlight then
-            btn._origHighlight:SetAlpha(1)
-            btn:SetHighlightTexture(btn._origHighlight)
-        end
-
-        btn._metalStyled = false
     end
 end
 
@@ -716,6 +704,25 @@ function Theme:ApplyPopupTheme(f)
     local useBlizzard = self:GetValue("useBlizzardFrame")
 
     self:ResetPopupChrome(f)
+
+    -- Popup titles live in their own child frame (Compatibility\Shim335.lua
+    -- buildButtonFrameSubstitute) so the retail metal frame's OVERLAY top bar
+    -- cannot draw over them. The popup sets its own frame level after
+    -- construction, so the host's level has to be re-derived here. Same trick as
+    -- EnsureRetailCloseButton below, and as UI\Header.lua:SetBackdropAlpha.
+    if f.TitleHost then
+        f.TitleHost:SetFrameLevel(f:GetFrameLevel() + ns.Constants.FRAME_LEVELS.HEADER)
+    end
+
+    -- The retail metal frame's title band is only opaque down to y = -21
+    -- (EnsureMetalFrame anchors mf.bg at TOPLEFT 2,-21), while the shim's default
+    -- title sits at -13 and is ~13px tall -- so its bottom 5px hang over the band's
+    -- lower border. Lift it so the whole line reads inside the bar. The other
+    -- themes have no band and keep the default.
+    if f.TitleText then
+        f.TitleText:ClearAllPoints()
+        f.TitleText:SetPoint("TOP", f, "TOP", 0, useMetal and -6 or -13)
+    end
 
     if useMetal then
         self:ApplyFrameBackground(f, 1, true)

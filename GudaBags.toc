@@ -45,6 +45,9 @@ Compatibility\API.lua
 Compatibility\Features.lua
 Compatibility\Pawn.lua
 
+# Transmogrification (Ascension C_Appearance). Must load before UI\ItemButton.lua.
+Core\Appearance.lua
+
 # Category System
 DB\DefaultCategories.lua
 Core\TooltipScanner.lua

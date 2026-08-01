@@ -87,6 +87,23 @@ local function IsYellowColor(r, g, b)
     return r > threshold.min_r and g > threshold.min_g and b < threshold.max_b
 end
 
+-- Ascension adds a purple tooltip line to gear whose appearance is still
+-- collectable: "Hold CTRL + ALT and CLICK to collect this appearance, binding
+-- the item to you." The string is server-sent -- it appears in neither
+-- Extensions.dll nor Ascension.exe -- so there is no constant to compare
+-- against and it has to be matched on the rendered tooltip.
+--
+-- Matched on two independent words rather than the full sentence so a reworded
+-- or re-punctuated line keeps working. Deliberately NOT colour-matched: the
+-- purple is the giveaway to a human, but tooltip colours drift and a wrong
+-- threshold would silently disable the marker.
+local function IsCollectAppearanceLine(text)
+    if not text then return false end
+    local lower = text:lower()
+    return lower:find("collect", 1, true) ~= nil
+        and lower:find("appearance", 1, true) ~= nil
+end
+
 -- Scan tooltip once and extract all needed information
 -- itemQuality: pass quality to skip hasSpecialProperties check for non-junk items
 local function ScanTooltipForItem(bagID, slot, itemType, itemID, itemLink, itemQuality, itemLoaded)
@@ -94,7 +111,7 @@ local function ScanTooltipForItem(bagID, slot, itemType, itemID, itemLink, itemQ
     local cached = GetCachedTooltipResult(cacheKey)
     if cached then
         ns:ProfileBump("tooltip.hit")
-        return cached.isUsable, cached.isQuestItem, cached.isQuestStarter, cached.hasSpecialProperties, cached.hasDuration, cached.isOpenable
+        return cached.isUsable, cached.isQuestItem, cached.isQuestStarter, cached.hasSpecialProperties, cached.hasDuration, cached.isOpenable, cached.canCollectAppearance
     end
 
     -- Item data not yet round-tripped from the server: the tooltip would be
@@ -106,7 +123,7 @@ local function ScanTooltipForItem(bagID, slot, itemType, itemID, itemLink, itemQ
         if C_Item.RequestLoadItemDataByID then
             C_Item.RequestLoadItemDataByID(itemID)
         end
-        return true, false, false, false, false, false
+        return true, false, false, false, false, false, false
     end
 
     -- GetItemInfo returned no name for this slot, so the item isn't resolved
@@ -114,7 +131,7 @@ local function ScanTooltipForItem(bagID, slot, itemType, itemID, itemLink, itemQ
     -- doesn't reflect the live per-instance tooltip). Scanning now risks a red
     -- "Retrieving item information" line marking it unusable — defer, no cache.
     if itemLoaded == false then
-        return true, false, false, false, false, false
+        return true, false, false, false, false, false, false
     end
 
     local isUsable = true
@@ -123,6 +140,7 @@ local function ScanTooltipForItem(bagID, slot, itemType, itemID, itemLink, itemQ
     local hasSpecialProperties = false
     local hasDuration = false
     local isOpenable = false
+    local canCollectAppearance = false
 
     -- Only check special properties for gray (0) or white (1) quality items
     -- These are the only ones where junk detection matters
@@ -150,7 +168,7 @@ local function ScanTooltipForItem(bagID, slot, itemType, itemID, itemLink, itemQ
     -- (quest-type/custom-quest detection above still applies); result is NOT cached
     -- so re-enabling restores full detection on the next scan.
     if ns.suspectDisabled and ns.suspectDisabled.tooltipscan then
-        return isUsable, isQuestItem, isQuestStarter, hasSpecialProperties, hasDuration, isOpenable
+        return isUsable, isQuestItem, isQuestStarter, hasSpecialProperties, hasDuration, isOpenable, canCollectAppearance
     end
 
     ns:ProfileBump("tooltip.miss")
@@ -173,7 +191,7 @@ local function ScanTooltipForItem(bagID, slot, itemType, itemID, itemLink, itemQ
                 -- is incomplete, so any red text is noise. Bail without caching
                 -- (isUsable stays true) — a later scan re-resolves once loaded.
                 if text and text == RETRIEVING_ITEM_INFO then
-                    return true, isQuestItem, isQuestStarter, false, false, false
+                    return true, isQuestItem, isQuestStarter, false, false, false, false
                 end
 
                 if text then
@@ -182,6 +200,11 @@ local function ScanTooltipForItem(bagID, slot, itemType, itemID, itemLink, itemQ
                     -- excludes equippable bags, which never show it.
                     if not isOpenable and ITEM_OPENABLE and text == ITEM_OPENABLE then
                         isOpenable = true
+                    end
+
+                    -- Ascension: appearance still collectable on this piece.
+                    if not canCollectAppearance and IsCollectAppearanceLine(text) then
+                        canCollectAppearance = true
                     end
 
                     -- Check for red text (unusable) - skip durability lines
@@ -255,9 +278,10 @@ local function ScanTooltipForItem(bagID, slot, itemType, itemID, itemLink, itemQ
         hasSpecialProperties = hasSpecialProperties,
         hasDuration = hasDuration,
         isOpenable = isOpenable,
+        canCollectAppearance = canCollectAppearance,
     })
 
-    return isUsable, isQuestItem, isQuestStarter, hasSpecialProperties, hasDuration, isOpenable
+    return isUsable, isQuestItem, isQuestStarter, hasSpecialProperties, hasDuration, isOpenable, canCollectAppearance
 end
 
 -- Get crafting quality tier (1-5) for Retail profession items, or nil.
@@ -337,6 +361,7 @@ function ItemScanner:ScanSlotFast(bagID, slot)
             hasSpecialProperties = cached.hasSpecialProperties,
             hasDuration = cached.hasDuration,
             isOpenable = cached.isOpenable,
+            canCollectAppearance = cached.canCollectAppearance,
             craftingQualityAtlas = GetCraftingQualityAtlas(itemLink),
         }
     end
@@ -387,7 +412,7 @@ function ItemScanner:ScanSlot(bagID, slot)
 
     -- Single optimized tooltip scan for all properties
     -- Pass quality so we only check hasSpecialProperties for gray/white items
-    local isUsable, isQuestItem, isQuestStarter, hasSpecialProperties, hasDuration, isOpenable = ScanTooltipForItem(bagID, slot, itemType, itemInfo.itemID, itemLink, quality, itemLoaded)
+    local isUsable, isQuestItem, isQuestStarter, hasSpecialProperties, hasDuration, isOpenable, canCollectAppearance = ScanTooltipForItem(bagID, slot, itemType, itemInfo.itemID, itemLink, quality, itemLoaded)
 
     return {
         slot = slot,
@@ -413,6 +438,7 @@ function ItemScanner:ScanSlot(bagID, slot)
         hasSpecialProperties = hasSpecialProperties,
         hasDuration = hasDuration,
         isOpenable = isOpenable,
+        canCollectAppearance = canCollectAppearance,
         craftingQualityAtlas = GetCraftingQualityAtlas(itemLink),
     }
 end

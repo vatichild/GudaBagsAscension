@@ -520,6 +520,8 @@ local function ResetButton(pool, button)
     if button.unusableOverlay then button.unusableOverlay:Hide() end
     if button.junkOverlay then button.junkOverlay:Hide() end
     if button.junkIcon then button.junkIcon:Hide() end
+    if button.transmogIcon then button.transmogIcon:Hide() end
+    if button.transmogIconShadow then button.transmogIconShadow:Hide() end
     if button.trackedIcon then button.trackedIcon:Hide() end
     if button.trackedIconShadow then button.trackedIconShadow:Hide() end
     if button.equipSetIcon then button.equipSetIcon:Hide() end
@@ -934,6 +936,30 @@ local function CreateButton(parent)
     junkIcon:SetTexture("Interface\\MoneyFrame\\UI-GoldIcon")
     junkIcon:Hide()
     button.junkIcon = junkIcon
+
+    -- Transmog dot (top-left). Marks equippable gear that can be transmogrified.
+    -- Shares the corner with the junk coin, the quest icons and the upgrade arrow;
+    -- SetItem yields to all three, and junk is excluded outright (a gray item is
+    -- about to be vendored, so its appearance is not the useful signal).
+    -- Shadow on ARTWORK, dot on OVERLAY -- see the marker outline note above
+    -- ShowMarkerPair. Both are 0/2 offset from the same corner, so the 15px black
+    -- disc sits concentrically behind the 11px coloured one and reads as a rim.
+    local transmogIconShadow = button:CreateTexture(nil, "ARTWORK", nil, 5)
+    transmogIconShadow:SetSize(15, 15)
+    transmogIconShadow:SetPoint("TOPLEFT", button, "TOPLEFT", 0, 0)
+    transmogIconShadow:SetTexture("Interface\\AddOns\\GudaBags\\Assets\\circle.tga")
+    transmogIconShadow:SetVertexColor(0, 0, 0, 1)
+    transmogIconShadow:Hide()
+    button.transmogIconShadow = transmogIconShadow
+
+    local transmogIcon = button:CreateTexture(nil, "OVERLAY", nil, 3)
+    transmogIcon:SetSize(11, 11)
+    transmogIcon:SetPoint("TOPLEFT", button, "TOPLEFT", 2, -2)
+    transmogIcon:SetTexture("Interface\\AddOns\\GudaBags\\Assets\\circle.tga")
+    transmogIcon:SetVertexColor(Constants.COLORS.TRANSMOG[1], Constants.COLORS.TRANSMOG[2],
+                                Constants.COLORS.TRANSMOG[3], 1)
+    transmogIcon:Hide()
+    button.transmogIcon = transmogIcon
 
     -- Crafting quality icon (top-left corner, Retail only).
     -- Wrapped in its own frame at frame-level BORDER+1 so the quality icon
@@ -1863,6 +1889,7 @@ local function GetCachedSettings()
             showItemLevel = Database:GetSetting("showItemLevel"),
             showCharges = Database:GetSetting("showCharges"),
             showBoeLabel = Database:GetSetting("showBoeLabel"),
+            markTransmog = Database:GetSetting("markTransmog"),
         }
         cachedSettingsFrame = currentFrame
     end
@@ -1986,6 +2013,8 @@ function ItemButton:SetItem(button, itemData, size, isReadOnly)
     if button.questIcon then button.questIcon:Hide() end
     if button.questStarterIcon then button.questStarterIcon:Hide() end
     if button.junkIcon then button.junkIcon:Hide() end
+    if button.transmogIcon then button.transmogIcon:Hide() end
+    if button.transmogIconShadow then button.transmogIconShadow:Hide() end
     if button.craftingQualityIcon then button.craftingQualityIcon:Hide() end
     if button.pinIcon then button.pinIcon:Hide() end
     if button.pinIconShadow then button.pinIconShadow:Hide() end
@@ -2418,6 +2447,37 @@ function ItemButton:SetItem(button, itemData, size, isReadOnly)
         ApplyUpgradeArrow(button)
         ns:ProfileStop("si.upgrade")
 
+        -- Transmog dot (top-left): this item's appearance can still be collected.
+        -- itemData.canCollectAppearance comes from the purple tooltip line
+        -- Ascension adds to collectable gear, matched during the scanner's
+        -- existing tooltip pass (Data\ItemScanner.lua) -- so it is only ever on
+        -- equippable items, and it says something the player can act on rather
+        -- than "this is transmoggable", which would be true of nearly every piece.
+        -- Junk is excluded outright: a gray item is on its way to a vendor, and
+        -- its coin icon owns this corner anyway.
+        --
+        -- Read straight off itemData like every other scanner flag rather than
+        -- through Core\Appearance.lua: no module lookup means no load-order
+        -- coupling, and the marker keeps working even if that file is absent.
+        --
+        -- Placed AFTER ApplyUpgradeArrow so upgradeArrow:IsShown() is current:
+        -- three markers share TOPLEFT and only one can win. Precedence is
+        -- urgency -- quest turn-in, then "this is an upgrade, equip it", then
+        -- "you can still collect this look".
+        if button.transmogIcon then
+            if settings.markTransmog
+                and not showQuestIndicator
+                and not IsJunkItem(itemData)
+                and not (button.upgradeArrow and button.upgradeArrow:IsShown())
+                and itemData.canCollectAppearance
+            then
+                ShowMarkerPair(button.transmogIconShadow, button.transmogIcon)
+            else
+                button.transmogIcon:Hide()
+                if button.transmogIconShadow then button.transmogIconShadow:Hide() end
+            end
+        end
+
         -- Pin icon (bottom-right corner)
         ItemButton:UpdatePinIcon(button)
 
@@ -2441,6 +2501,10 @@ function ItemButton:SetItem(button, itemData, size, isReadOnly)
         end
         if button.junkIcon then
             button.junkIcon:Hide()
+        end
+        if button.transmogIcon then
+            button.transmogIcon:Hide()
+            button.transmogIconShadow:Hide()
         end
         if button.questIcon then
             button.questIcon:Hide()
@@ -2635,6 +2699,10 @@ function ItemButton:SetEmpty(button, bagID, slot, size, isReadOnly, isGuildBank)
     end
     if button.junkIcon then
         button.junkIcon:Hide()
+    end
+    if button.transmogIcon then
+        button.transmogIcon:Hide()
+        button.transmogIconShadow:Hide()
     end
     if button.questIcon then
         button.questIcon:Hide()
@@ -3040,7 +3108,7 @@ if Events then
             or key == "otherBorders" or key == "markUnusableItems"
             or key == "markEquipmentSets"
             or key == "showItemLevel" or key == "showCharges"
-            or key == "showBoeLabel" then
+            or key == "showBoeLabel" or key == "markTransmog" then
             ItemButton:InvalidateSettingsCache()
         end
     end, ItemButton)
