@@ -87,21 +87,50 @@ local function IsYellowColor(r, g, b)
     return r > threshold.min_r and g > threshold.min_g and b < threshold.max_b
 end
 
+-- Check for purple/violet text (Ascension's collectable-appearance line)
+local function IsPurpleColor(r, g, b)
+    if not r or not g or not b then return false end
+    local threshold = Constants.COLOR_THRESHOLDS.PURPLE
+    -- The absolute bounds catch the shade; "both channels beat green" is what
+    -- actually makes a colour purple rather than blue, grey or pink.
+    return r > threshold.min_r and g < threshold.max_g and b > threshold.min_b
+        and r > g and b > g
+end
+
 -- Ascension adds a purple tooltip line to gear whose appearance is still
 -- collectable: "Hold CTRL + ALT and CLICK to collect this appearance, binding
 -- the item to you." The string is server-sent -- it appears in neither
 -- Extensions.dll nor Ascension.exe -- so there is no constant to compare
 -- against and it has to be matched on the rendered tooltip.
 --
--- Matched on two independent words rather than the full sentence so a reworded
--- or re-punctuated line keeps working. Deliberately NOT colour-matched: the
--- purple is the giveaway to a human, but tooltip colours drift and a wrong
--- threshold would silently disable the marker.
-local function IsCollectAppearanceLine(text)
+-- BOTH the wording and the colour must match, and every word below has to be
+-- present. Matching on independent keywords rather than the full sentence means
+-- rewording or re-punctuation keeps working.
+--
+-- "click" is the load-bearing one. Ascension puts a purple line on gear whose
+-- appearance you ALREADY own too, and that line also talks about collecting an
+-- appearance -- so "collect" + "appearance" alone marked the entire
+-- already-collected half of the bag. The difference is that the collectable line
+-- is a call to ACTION ("...and Click to collect this appearance...") while the
+-- other is a status, so only one of them tells you to click.
+--
+-- If the dot stops appearing, this list and the purple threshold are the two
+-- things to check -- /gbdiag mog prints both verdicts per line.
+local COLLECT_APPEARANCE_WORDS = { "click", "collect", "appearance" }
+
+local function MatchesCollectWords(lowerText)
+    for i = 1, #COLLECT_APPEARANCE_WORDS do
+        if not lowerText:find(COLLECT_APPEARANCE_WORDS[i], 1, true) then
+            return false
+        end
+    end
+    return true
+end
+
+local function IsCollectAppearanceLine(text, r, g, b)
     if not text then return false end
-    local lower = text:lower()
-    return lower:find("collect", 1, true) ~= nil
-        and lower:find("appearance", 1, true) ~= nil
+    if not IsPurpleColor(r, g, b) then return false end
+    return MatchesCollectWords(text:lower())
 end
 
 -- Scan tooltip once and extract all needed information
@@ -203,7 +232,7 @@ local function ScanTooltipForItem(bagID, slot, itemType, itemID, itemLink, itemQ
                     end
 
                     -- Ascension: appearance still collectable on this piece.
-                    if not canCollectAppearance and IsCollectAppearanceLine(text) then
+                    if not canCollectAppearance and IsCollectAppearanceLine(text, r, g, b) then
                         canCollectAppearance = true
                     end
 

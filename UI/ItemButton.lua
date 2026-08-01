@@ -942,10 +942,10 @@ local function CreateButton(parent)
     -- SetItem yields to all three, and junk is excluded outright (a gray item is
     -- about to be vendored, so its appearance is not the useful signal).
     -- Shadow on ARTWORK, dot on OVERLAY -- see the marker outline note above
-    -- ShowMarkerPair. Both are 0/2 offset from the same corner, so the 15px black
-    -- disc sits concentrically behind the 11px coloured one and reads as a rim.
+    -- ShowMarkerPair. The 0/1 corner offsets keep the 8px black disc concentric
+    -- with the 6px coloured one, so it reads as a 1px rim at any icon size.
     local transmogIconShadow = button:CreateTexture(nil, "ARTWORK", nil, 5)
-    transmogIconShadow:SetSize(15, 15)
+    transmogIconShadow:SetSize(8, 8)
     transmogIconShadow:SetPoint("TOPLEFT", button, "TOPLEFT", 0, 0)
     transmogIconShadow:SetTexture("Interface\\AddOns\\GudaBags\\Assets\\circle.tga")
     transmogIconShadow:SetVertexColor(0, 0, 0, 1)
@@ -953,8 +953,8 @@ local function CreateButton(parent)
     button.transmogIconShadow = transmogIconShadow
 
     local transmogIcon = button:CreateTexture(nil, "OVERLAY", nil, 3)
-    transmogIcon:SetSize(11, 11)
-    transmogIcon:SetPoint("TOPLEFT", button, "TOPLEFT", 2, -2)
+    transmogIcon:SetSize(6, 6)
+    transmogIcon:SetPoint("TOPLEFT", button, "TOPLEFT", 1, -1)
     transmogIcon:SetTexture("Interface\\AddOns\\GudaBags\\Assets\\circle.tga")
     transmogIcon:SetVertexColor(Constants.COLORS.TRANSMOG[1], Constants.COLORS.TRANSMOG[2],
                                 Constants.COLORS.TRANSMOG[3], 1)

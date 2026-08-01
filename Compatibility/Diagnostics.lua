@@ -375,6 +375,82 @@ end
 --- Run it with bags open, ideally right after locking something that made a wrong
 --- icon appear. STALE lines are the smoking gun; ORPHAN counts buttons whose slot
 --- no longer exists at all.
+-- The transmog dot is driven by a server-sent tooltip line that exists in no
+-- binary and no GlobalString, matched on BOTH its wording and its purple colour
+-- (Data\ItemScanner.lua). That makes a wrong colour threshold a silent failure:
+-- no error, just no dots. This prints the raw text and RGB of every tooltip line
+-- on your gear so the threshold can be checked against what the client actually
+-- sends, instead of guessed at.
+local function DumpTransmogLines()
+    line("---- transmog tooltip lines ----")
+
+    local threshold = ns.Constants.COLOR_THRESHOLDS.PURPLE
+    line("PURPLE threshold: r>%.2f  g<%.2f  b>%.2f  (and r>g and b>g)",
+        threshold.min_r, threshold.max_g, threshold.min_b)
+    line("required words: click + collect + appearance (all must be present)")
+    line("A purple line that FAILS the words is the already-collected status line.")
+
+    local ItemScanner = ns:GetModule("ItemScanner")
+    local tip = ItemScanner and ItemScanner.GetScanningTooltip and ItemScanner:GetScanningTooltip()
+    if not tip then
+        line("ItemScanner scanning tooltip unavailable")
+        return
+    end
+
+    local scanned, hits = 0, 0
+    for bag = 0, 4 do
+        local slots = C_Container.GetContainerNumSlots(bag) or 0
+        for slot = 1, slots do
+            local link = C_Container.GetContainerItemLink(bag, slot)
+            local equipSlot = link and select(9, GetItemInfo(link)) or nil
+            if equipSlot and equipSlot ~= "" and equipSlot ~= "INVTYPE_BAG" then
+                scanned = scanned + 1
+                tip:SetOwner(WorldFrame, "ANCHOR_NONE")
+                tip:ClearLines()
+                tip:SetBagItem(bag, slot)
+
+                local shown = false
+                for i = 1, (tip:NumLines() or 0) do
+                    local fs = _G["GudaBagsScanningTooltipTextLeft" .. i]
+                    if fs and fs:IsShown() and fs:GetText() then
+                        local text = fs:GetText()
+                        local r, g, b = fs:GetTextColor()
+                        local lower = text:lower()
+                        -- Only the candidate lines: printing every line of every
+                        -- item would bury the answer in hundreds of rows.
+                        if lower:find("collect", 1, true) or lower:find("appearance", 1, true) then
+                            if not shown then
+                                line("  [%d:%d] %s", bag, slot, link)
+                                shown = true
+                            end
+                            hits = hits + 1
+                            -- Report the two verdicts SEPARATELY. A line that is
+                            -- purple but fails the words is the already-collected
+                            -- status line (expected: no dot). One that passes the
+                            -- words but not the colour means the threshold is off.
+                            local purple = r > threshold.min_r and g < threshold.max_g
+                                and b > threshold.min_b and r > g and b > g
+                            local words = lower:find("click", 1, true)
+                                and lower:find("collect", 1, true)
+                                and lower:find("appearance", 1, true)
+                            line("     line %d  r=%.3f g=%.3f b=%.3f  purple=%s words=%s -> dot=%s",
+                                i, r, g, b, tostring(purple), tostring(words and true or false),
+                                tostring((purple and words) and true or false))
+                            line("        %q", text)
+                        end
+                    end
+                end
+            end
+        end
+    end
+
+    line("scanned %d equippable item(s), %d candidate line(s)", scanned, hits)
+    if scanned > 0 and hits == 0 then
+        line("No candidate lines at all -- this gear has no collectable appearance,")
+        line("or the wording changed (ItemScanner matches 'collect' AND 'appearance').")
+    end
+end
+
 local function DumpMarkerState()
     line("---- item button marker state ----")
 
@@ -693,6 +769,13 @@ SlashCmdList["GUDABAGSDIAG"] = function(arg)
         pcall(DumpChildren)
         GudaBags_Diag = report
         DEFAULT_CHAT_FRAME:AddMessage("|cff00ccff[diag]|r saved to GudaBags_Diag -- /reload to write it")
+        return
+    elseif arg == "mog" then
+        report = {}
+        pcall(DumpTransmogLines)
+        GudaBags_Diag = report
+        DEFAULT_CHAT_FRAME:AddMessage(
+            "|cff00ccff[diag]|r saved to GudaBags_Diag -- /reload to write it to disk")
         return
     elseif arg == "markers" then
         report = {}

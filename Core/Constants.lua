@@ -556,6 +556,12 @@ Constants.COLOR_THRESHOLDS = {
     RED = { min_r = 0.85, max_g = 0.3, max_b = 0.3 },
     GREEN = { max_r = 0.2, min_g = 0.9, max_b = 0.2 },
     YELLOW = { min_r = 0.9, min_g = 0.7, max_b = 0.2 },
+    -- Ascension's "collect this appearance" tooltip line. Deliberately loose:
+    -- the test that matters is "blue and red both clearly beat green", which is
+    -- what makes a colour read as purple/violet at all. Tight thresholds here
+    -- would silently blank the transmog dot if the server ever nudges the shade
+    -- -- run /gbdiag mog to see the real values this client sends.
+    PURPLE = { min_r = 0.30, max_g = 0.55, min_b = 0.55 },
 }
 
 -------------------------------------------------
