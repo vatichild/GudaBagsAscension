@@ -451,6 +451,54 @@ local function DumpTransmogLines()
     end
 end
 
+-- Replay the last restack: what was attempted, what the client reported back,
+-- and which slots were still locked when it handed control to the UI.
+--
+-- The restack mutates bags asynchronously and its failures are silent -- the
+-- server simply never answers -- so by the time a slot shows up grey every piece
+-- of evidence is gone unless it was recorded as it happened.
+local function DumpRestackLog()
+    line("---- last restack ----")
+
+    local SortEngine = ns:GetModule("SortEngine")
+    if not SortEngine or not SortEngine.GetRestackLog then
+        line("SortEngine has no restack log (old build?)")
+        return
+    end
+
+    local log, count = SortEngine:GetRestackLog()
+    if not count or count == 0 then
+        line("no restack recorded yet -- run Restack and Clean, then this command")
+        return
+    end
+
+    for i = 1, count do
+        line("%s", tostring(log[i]))
+    end
+
+    -- Live state now, which is the part the log itself cannot know: a slot listed
+    -- as locked at FINISH but unlocked here recovered on its own; one still
+    -- locked here is the stuck item, and only a relog clears it.
+    line("---- locked slots right now ----")
+    local stuck = 0
+    for _, bagID in ipairs(ns.Constants.BAG_IDS) do
+        for slot = 1, (C_Container.GetContainerNumSlots(bagID) or 0) do
+            local info = C_Container.GetContainerItemInfo(bagID, slot)
+            if info and info.isLocked then
+                stuck = stuck + 1
+                line("  %d:%d LOCKED item=%s %s", bagID, slot,
+                    tostring(info.itemID), tostring(info.hyperlink))
+            end
+        end
+    end
+    if stuck == 0 then
+        line("  none -- bags are clean")
+    else
+        line("  %d slot(s) still locked. /reload will NOT clear these;", stuck)
+        line("  log out to character select and back in.")
+    end
+end
+
 local function DumpMarkerState()
     line("---- item button marker state ----")
 
@@ -769,6 +817,13 @@ SlashCmdList["GUDABAGSDIAG"] = function(arg)
         pcall(DumpChildren)
         GudaBags_Diag = report
         DEFAULT_CHAT_FRAME:AddMessage("|cff00ccff[diag]|r saved to GudaBags_Diag -- /reload to write it")
+        return
+    elseif arg == "restack" then
+        report = {}
+        pcall(DumpRestackLog)
+        GudaBags_Diag = report
+        DEFAULT_CHAT_FRAME:AddMessage(
+            "|cff00ccff[diag]|r saved to GudaBags_Diag -- /reload to write it to disk")
         return
     elseif arg == "mog" then
         report = {}

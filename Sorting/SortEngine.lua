@@ -14,6 +14,7 @@ local Expansion = ns:GetModule("Expansion")
 -- Cached globals
 local InCombatLockdown = InCombatLockdown
 local ClearCursor = ClearCursor
+local GetCursorInfo = GetCursorInfo
 local C_Container_GetContainerItemInfo = C_Container.GetContainerItemInfo
 local C_Container_GetContainerNumSlots = C_Container.GetContainerNumSlots
 local C_Container_GetContainerNumFreeSlots = C_Container.GetContainerNumFreeSlots
@@ -79,6 +80,93 @@ local function AddPendingLock(bagID, slot)
     pendingLockSlots[idx + 2] = slot
     pendingLockCount = pendingLockCount + 1
     pendingLockSet[bagID * 1000 + slot] = true
+end
+
+-------------------------------------------------
+-- Restack diagnostics
+--
+-- The restack path is the hardest thing in this addon to reason about from the
+-- outside: it mutates the bags asynchronously, its failures are silent (the
+-- server simply never replies), and by the time the UI shows a grey slot every
+-- piece of evidence is gone. This records what was actually attempted and what
+-- the client reported back, so a bug report can be read instead of guessed at.
+--
+-- Only ever active during a restack, capped, and dumped by `/gbdiag restack`.
+-------------------------------------------------
+local RESTACK_LOG_MAX = 500
+local restackLog = {}
+local restackLogCount = 0
+local restackLogStart = 0
+
+local function RLogReset()
+    restackLogCount = 0
+    restackLogStart = GetTime()
+    wipe(restackLog)
+end
+
+local function RLog(fmt, ...)
+    -- Stop recording rather than grow without bound; the head of a runaway log
+    -- is the interesting part anyway.
+    if restackLogCount >= RESTACK_LOG_MAX then return end
+    local ok, line = pcall(string.format, fmt, ...)
+    restackLogCount = restackLogCount + 1
+    restackLog[restackLogCount] = string.format("[%6.2fs] %s",
+        GetTime() - restackLogStart, ok and line or tostring(fmt))
+    if ns.debugMode then ns:Debug("[restack] " .. restackLog[restackLogCount]) end
+end
+
+--- Describe a slot's live state for the log: item and lock flag straight from
+--- the API, never from a cache -- a cached value is what we are trying to check.
+local function SlotState(bagID, slot)
+    local info = C_Container_GetContainerItemInfo(bagID, slot)
+    if not info then return "empty" end
+    return string.format("item=%s x%s%s",
+        tostring(info.itemID), tostring(info.stackCount),
+        info.isLocked and " LOCKED" or "")
+end
+
+--- Report every slot in the pending wait-list that is still locked.
+--- @return number how many are still locked
+local function LogPendingLockState(label)
+    local stillLocked = 0
+    for i = 0, pendingLockCount - 1 do
+        local bagID = pendingLockSlots[i * 2 + 1]
+        local slot = pendingLockSlots[i * 2 + 2]
+        local info = C_Container_GetContainerItemInfo(bagID, slot)
+        if info and info.isLocked then
+            stillLocked = stillLocked + 1
+            RLog("  %s: %d:%d still locked (%s)", label, bagID, slot, SlotState(bagID, slot))
+        end
+    end
+    return stillLocked
+end
+
+--- Copy the log into the GudaBags_Diag saved variable so it reaches disk on the
+--- next /reload or logout. Automatic: a user hitting this bug should not also
+--- have to remember a command, and the chat window cannot be copied out of.
+--- GudaBags_Diag is a plain array of strings (see Compatibility\Diagnostics.lua),
+--- so the shape matches what /gbdiag already writes.
+local function PersistRestackLog()
+    local out = {}
+    for i = 1, restackLogCount do
+        out[i] = restackLog[i]
+    end
+    _G.GudaBags_Diag = out
+end
+
+--- @return table log lines, @return number count
+function SortEngine:GetRestackLog()
+    return restackLog, restackLogCount
+end
+
+--- Append to the restack log from outside this file. UI\BagFrame.lua uses it to
+--- record what the BUTTONS looked like after the post-restack refresh, so the
+--- engine's view and the screen's view land in one timeline -- a slot the engine
+--- reports as unlocked while the button still shows a lock overlay is a display
+--- bug, not a move bug, and nothing else can tell those two apart.
+function SortEngine:LogRestack(fmt, ...)
+    RLog(fmt, ...)
+    PersistRestackLog()
 end
 
 -- Performance: Cache computed sort keys by itemID across passes
@@ -1193,27 +1281,81 @@ local function ConsolidateStacks(bagIDs, bagFamilies)
                                     local targetInfo = C_Container_GetContainerItemInfo(target.bagID, target.slot)
 
                                     if sourceInfo and targetInfo and not sourceInfo.isLocked and not targetInfo.isLocked then
-                                        if amountToMove < target.count then
+                                        -- PickupContainerItem SWAPS the cursor with a slot; it is
+                                        -- not "drop here". Every step below therefore has to know
+                                        -- what is on the cursor, and this used to check nothing at
+                                        -- all -- it fired both calls blind and then called
+                                        -- ClearCursor() unconditionally.
+                                        --
+                                        -- Start empty, or the first call would drop a foreign item
+                                        -- into a bag slot.
+                                        if GetCursorInfo() then ClearCursor() end
+
+                                        local isSplit = amountToMove < target.count
+                                        RLog("move item=%s %d:%d -> %d:%d amount=%d %s | src(%s) tgt(%s)",
+                                            tostring(group.itemID),
+                                            target.bagID, target.slot, source.bagID, source.slot,
+                                            amountToMove, isSplit and "split" or "whole",
+                                            SlotState(source.bagID, source.slot),
+                                            SlotState(target.bagID, target.slot))
+
+                                        if isSplit then
                                             C_Container_SplitContainerItem(target.bagID, target.slot, amountToMove)
-                                            C_Container_PickupContainerItem(source.bagID, source.slot)
                                         else
                                             C_Container_PickupContainerItem(target.bagID, target.slot)
-                                            C_Container_PickupContainerItem(source.bagID, source.slot)
                                         end
-                                        ClearCursor()
-                                        AddPendingLock(source.bagID, source.slot)
+
+                                        -- Register the moment a slot is TOUCHED, not when a move
+                                        -- succeeds. The pending set is a wait-list for the driver,
+                                        -- not a record of what worked: a slot we poked is locked
+                                        -- until the server replies whether or not the move landed.
+                                        -- Registering one extra slot costs a drain check; missing
+                                        -- one leaves a locked slot nobody is waiting for, which is
+                                        -- the whole bug.
                                         AddPendingLock(target.bagID, target.slot)
 
-                                        if not soundsMuted then
-                                            MutePickupSounds()
-                                            soundsMuted = true
+                                        -- THE important check. If the pickup/split was refused the
+                                        -- cursor is still empty, and the second call below would
+                                        -- pick the SOURCE stack up instead of dropping onto it --
+                                        -- locking a slot for a move that was never planned, with
+                                        -- no matching server reply to release it. That is the
+                                        -- permanently grey, uninteractable item.
+                                        if GetCursorInfo() then
+                                            C_Container_PickupContainerItem(source.bagID, source.slot)
+                                            AddPendingLock(source.bagID, source.slot)
+
+                                            if GetCursorInfo() then
+                                                -- Source refused the drop (wrong family, filled up
+                                                -- since the read above). Put it back, count nothing.
+                                                RLog("  REJECTED by source %d:%d, cursor still full -> ClearCursor",
+                                                    source.bagID, source.slot)
+                                                ClearCursor()
+                                            else
+                                                RLog("  ok")
+                                                if not soundsMuted then
+                                                    MutePickupSounds()
+                                                    soundsMuted = true
+                                                end
+
+                                                -- Advance the model ONLY on success. Doing it
+                                                -- unconditionally is what poisoned later iterations:
+                                                -- they computed amountToMove from counts that never
+                                                -- happened and emitted requests the server silently
+                                                -- drops, leaving both slots locked forever.
+                                                source.count = source.count + amountToMove
+                                                target.count = target.count - amountToMove
+                                                consolidationMoves = consolidationMoves + 1
+
+                                                if source.count >= maxStack then break end
+                                            end
+                                        else
+                                            -- The pickup/split never loaded the cursor. The slot was
+                                            -- still poked, so it may be locked -- already on the
+                                            -- wait-list above.
+                                            RLog("  REFUSED: %s left cursor empty (tgt now %s)",
+                                                isSplit and "split" or "pickup",
+                                                SlotState(target.bagID, target.slot))
                                         end
-
-                                        source.count = source.count + amountToMove
-                                        target.count = target.count - amountToMove
-                                        consolidationMoves = consolidationMoves + 1
-
-                                        if source.count >= maxStack then break end
                                     end
                                 end
                             end
@@ -1250,19 +1392,42 @@ local function RestackRouteSpecialized(bagIDs)
         -- target is still empty, and neither slot is locked from a prior pickup.
         if srcInfo and srcInfo.itemID == move.expectedItemID and not srcInfo.isLocked
            and (not tgtInfo or not tgtInfo.itemID) then
+            -- Same three-stage cursor discipline as ConsolidateStacks above.
+            -- Routing is the likeliest restack move to be refused, because it
+            -- deliberately targets specialised bags that can reject the item.
+            RLog("route item=%s %d:%d -> %d:%d | src(%s) tgt(%s)",
+                tostring(move.expectedItemID),
+                move.sourceBag, move.sourceSlot, move.targetBag, move.targetSlot,
+                SlotState(move.sourceBag, move.sourceSlot),
+                SlotState(move.targetBag, move.targetSlot))
+
+            if GetCursorInfo() then ClearCursor() end
+
             C_Container_PickupContainerItem(move.sourceBag, move.sourceSlot)
-            C_Container_PickupContainerItem(move.targetBag, move.targetSlot)
-            ClearCursor()
-
+            -- Touched, so wait on it regardless of outcome -- see ConsolidateStacks.
             AddPendingLock(move.sourceBag, move.sourceSlot)
-            AddPendingLock(move.targetBag, move.targetSlot)
 
-            if not soundsMuted then
-                MutePickupSounds()
-                soundsMuted = true
+            if GetCursorInfo() then
+                C_Container_PickupContainerItem(move.targetBag, move.targetSlot)
+                AddPendingLock(move.targetBag, move.targetSlot)
+
+                if GetCursorInfo() then
+                    -- Target bag refused it: put it back, count nothing.
+                    RLog("  REJECTED by target bag %d -> ClearCursor", move.targetBag)
+                    ClearCursor()
+                else
+                    RLog("  ok")
+                    if not soundsMuted then
+                        MutePickupSounds()
+                        soundsMuted = true
+                    end
+
+                    executed = executed + 1
+                end
+            else
+                RLog("  REFUSED: pickup of %d:%d left cursor empty",
+                    move.sourceBag, move.sourceSlot)
             end
-
-            executed = executed + 1
         end
     end
 
@@ -1673,9 +1838,89 @@ local restackInProgress = false
 local restackBagIDs = nil
 local restackCallback = nil
 local restackPassCount = 0
-local restackMaxPasses = 4
+-- Once a pass merges a pair, the destination slot is locked, so every later
+-- merge for that SAME item is skipped by the isLocked guard in ConsolidateStacks
+-- and has to wait for the next pass. In practice a pass therefore lands about one
+-- merge per item type, and four passes could not converge a bag holding several
+-- stacks of several things -- it hit the cap with work outstanding, which was the
+-- worst exit. Convergence is detected by `moves == 0`; this is only a backstop,
+-- and the 30s watchdog below is the real bound.
+local restackMaxPasses = 20
 local restackNextPassTime = 0
 local restackPhase = nil  -- "route" then "consolidate"; nil when idle
+-- "drain": the passes are done but the last batch's locks are still outstanding.
+-- The exit used to fire the callback in the same frame the moves were issued and
+-- throw the pending set away, so the caller rescanned while slots were still
+-- locked and painted them grey with nothing left to repaint them.
+local restackDraining = false
+-- Hard deadline, mirroring the sort path's sortTimeout. Without it a lock that
+-- never clears wedges the driver: AnyItemsLocked() stays true, the OnUpdate
+-- returns early every frame, restackInProgress stays true FOR THE SESSION, and
+-- that permanently suppresses StartLockWatch (UI\BagFrame.lua) plus the
+-- IsRestacking() guards in BagScanner, TrackedBar and QuestBar.
+local restackDeadline = 0
+local RESTACK_TIMEOUT = 30
+
+-- The one teardown path for every way a restack can end: finished, drained,
+-- timed out or cancelled by combat. restackInProgress is cleared BEFORE the
+-- callback deliberately -- UI\BagFrame.lua's StartLockWatch refuses to run while
+-- IsRestacking() is true, and the callback is exactly where it needs to.
+local function FinishRestack(reason)
+    -- The single most useful line in the log: which slots are STILL locked at the
+    -- moment we hand control back. Anything listed here is what the user will see
+    -- greyed out, and it means the client is waiting on a server reply that never
+    -- came for that slot.
+    local stuck = LogPendingLockState("FINISH")
+    RLog("finish (%s): passes=%d pendingSlots=%d stillLocked=%d",
+        reason or "done", restackPassCount, pendingLockCount, stuck)
+    PersistRestackLog()
+
+    -- Sample again shortly afterwards. A lock that releases on its own within a
+    -- second or two is a timing problem in this addon; one that is still set is a
+    -- request the server never answered, which no amount of Lua can undo. Those
+    -- are different bugs with different fixes, and only a delayed sample tells
+    -- them apart -- so take it automatically rather than asking for another
+    -- command after the fact.
+    local bagIDs = restackBagIDs
+    C_Timer.After(2, function()
+        local locked = 0
+        for _, bagID in ipairs(bagIDs or {}) do
+            for slot = 1, (C_Container_GetContainerNumSlots(bagID) or 0) do
+                local info = C_Container_GetContainerItemInfo(bagID, slot)
+                if info and info.isLocked then
+                    locked = locked + 1
+                    RLog("  +2s: %d:%d STILL LOCKED (%s)", bagID, slot, SlotState(bagID, slot))
+                end
+            end
+        end
+        RLog("+2s recheck: %d slot(s) locked", locked)
+        PersistRestackLog()
+    end)
+
+    restackInProgress = false
+    restackDraining = false
+    restackPhase = nil
+    restackPassCount = 0
+    ClearPendingLocks()
+    UnmutePickupSounds()
+    -- Restack never reset this; only the sort path did. Harmless on 3.3.5a where
+    -- the mute APIs are stubs, wrong anywhere they are real.
+    soundsMuted = false
+    -- Never leave the cursor holding an item: the next click would drop it
+    -- somewhere the player did not choose.
+    if GetCursorInfo() then ClearCursor() end
+
+    local BagFrameModule = ns:GetModule("BagFrame")
+    if BagFrameModule then BagFrameModule:InvalidateLayout() end
+    local BankFrameModule = ns:GetModule("BankFrame")
+    if BankFrameModule then BankFrameModule:InvalidateLayout() end
+
+    -- Consume the callback so no path can fire it twice (drain -> timeout, or
+    -- timeout racing a late completion).
+    local callback = restackCallback
+    restackCallback = nil
+    if callback then callback() end
+end
 
 local restackFrame = CreateFrame("Frame")
 restackFrame:SetScript("OnUpdate", function(self, elapsed)
@@ -1684,18 +1929,24 @@ restackFrame:SetScript("OnUpdate", function(self, elapsed)
     -- Cancel restack immediately if combat starts
     if InCombatLockdown() then
         ClearCursor()
-        restackInProgress = false
-        restackPhase = nil
-        ClearPendingLocks()
-        UnmutePickupSounds()
         ns:Print("Restack cancelled: entered combat")
-        if restackCallback then
-            restackCallback()
-        end
+        FinishRestack("combat")
         return
     end
 
     local now = GetTime()
+
+    -- Watchdog. Without it a slot whose lock never clears parks this OnUpdate on
+    -- the AnyItemsLocked() gate below forever, with restackInProgress stuck true
+    -- for the rest of the session. Debug-only message: a user-facing string would
+    -- need all 11 locales (Rule 5) to report something they cannot act on.
+    if now > restackDeadline then
+        ClearCursor()
+        ns:Debug("Restack timed out after " .. RESTACK_TIMEOUT .. "s; finishing with locks outstanding")
+        FinishRestack("timeout")
+        return
+    end
+
     local isBankRestack = (restackBagIDs == Constants.BANK_BAG_IDS)
 
     -- Bank operations are server-side and need longer delays
@@ -1709,13 +1960,25 @@ restackFrame:SetScript("OnUpdate", function(self, elapsed)
         return
     end
 
+    -- Passes are done and the final batch's locks have now drained (the gate
+    -- above fell through). Only now may the caller rescan -- doing it earlier is
+    -- what baked isLocked=true into the scan and painted items grey.
+    if restackDraining then
+        FinishRestack("drained")
+        return
+    end
+
     -- Phase 1 (one-shot): route specialized items into matching bags
     -- so Category View's "Clean Up" sends ammo→quiver, soul shards→soul bag, etc.
     if restackPhase == "route" then
-        local routedMoves = RestackRouteSpecialized(restackBagIDs)
+        RLog("phase route")
+        local routed = RestackRouteSpecialized(restackBagIDs)
+        RLog("phase route done: executed=%d pendingSlots=%d", routed, pendingLockCount)
         restackPhase = "consolidate"
-        if routedMoves > 0 then
-            -- Defer next pass so the lock-wait check above gates execution
+        -- Defer on the wait-list rather than on the move count: routing touches
+        -- (and so locks) slots even when every drop was refused, and the
+        -- consolidate pass must not run against slots that are still settling.
+        if pendingLockCount > 0 then
             restackNextPassTime = now + lockWaitTime
         end
         return
@@ -1723,22 +1986,25 @@ restackFrame:SetScript("OnUpdate", function(self, elapsed)
 
     -- Phase 2: consolidate partial stacks (existing multi-pass loop)
     restackPassCount = restackPassCount + 1
+    RLog("pass %d begin", restackPassCount)
 
     local _, bagFamilies = ClassifyBags(restackBagIDs)
     local moves = ConsolidateStacks(restackBagIDs, bagFamilies)
+    RLog("pass %d end: moves=%d pendingSlots=%d", restackPassCount, moves, pendingLockCount)
 
     if moves == 0 or restackPassCount >= restackMaxPasses then
-        -- Done restacking - invalidate layouts so next update triggers full refresh
-        restackInProgress = false
-        restackPhase = nil
-        ClearPendingLocks()
-        UnmutePickupSounds()
-        local BagFrameModule = ns:GetModule("BagFrame")
-        if BagFrameModule then BagFrameModule:InvalidateLayout() end
-        local BankFrameModule = ns:GetModule("BankFrame")
-        if BankFrameModule then BankFrameModule:InvalidateLayout() end
-        if restackCallback then
-            restackCallback()
+        -- Drain on the pending set, not on the move count. A pass can touch slots
+        -- and still land zero moves (every drop refused), and those slots are just
+        -- as locked as a successful move's -- finishing here would hand the caller
+        -- a bag full of locks to rescan, which is what painted items grey.
+        if pendingLockCount > 0 then
+            RLog("draining %d pending slot(s), %s",
+                pendingLockCount,
+                moves == 0 and "converged" or "hit pass cap")
+            restackDraining = true
+            restackNextPassTime = now + lockWaitTime
+        else
+            FinishRestack("converged")
         end
     end
 end)
@@ -1756,6 +2022,10 @@ function SortEngine:RestackBags(callback)
     restackPassCount = 0
     restackNextPassTime = 0
     restackPhase = "route"
+    restackDraining = false
+    restackDeadline = GetTime() + RESTACK_TIMEOUT
+    RLogReset()
+    RLog("RestackBags start: bags=%s", table.concat(restackBagIDs, ","))
 
     MutePickupSounds()
     return true
@@ -1779,6 +2049,10 @@ function SortEngine:RestackBank(callback)
     restackPassCount = 0
     restackNextPassTime = 0
     restackPhase = "consolidate"
+    restackDraining = false
+    restackDeadline = GetTime() + RESTACK_TIMEOUT
+    RLogReset()
+    RLog("RestackBank start: bags=%s", table.concat(restackBagIDs, ","))
 
     MutePickupSounds()
     return true
@@ -1806,6 +2080,10 @@ function SortEngine:RestackWarbandBank(callback)
     restackPassCount = 0
     restackNextPassTime = 0
     restackPhase = "consolidate"
+    restackDraining = false
+    restackDeadline = GetTime() + RESTACK_TIMEOUT
+    RLogReset()
+    RLog("RestackWarbandBank start: bags=%s", table.concat(restackBagIDs, ","))
 
     MutePickupSounds()
     return true

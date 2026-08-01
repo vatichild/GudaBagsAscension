@@ -213,8 +213,15 @@ The 3.3.5a client tells you a lot less than Retail does when something goes wron
 | `/gbdiag guid` | Check whether this client's item GUIDs are real per-item identities. Run it, swap two items between occupied slots, run it again. |
 | `/gbdiag markers` | Check every bag button's cached item against the live slot. Run it when a lock, pin or star icon shows up on the wrong item. |
 | `/gbdiag mog` | Print the text and RGB of the "collect this appearance" tooltip line on your gear. Run it when the transmog dot doesn't show up — the line is matched on both its wording and its purple colour. |
+| `/gbdiag restack` | Replay the last Restack and Clean: every move attempted, what the client reported back, and which slots were still locked at the end. Run it right after a restack that left an item greyed out. |
 | `/gbdiag unblock` | Turn off the mouse on frames that are eating your clicks |
 | `/gbtrace on\|off\|dump` | Leave breadcrumbs that survive a client crash |
+
+### If an item is stuck grey and you can't click it
+
+Log out to character select and back in. `/reload` will **not** clear it: the lock lives in the
+client's own item state, which a UI reload does not touch, so only a fresh login re-syncs it from
+the server.
 
 ---
 

@@ -2381,6 +2381,33 @@ function BagFrame:RestackAndClean()
                     -- are suppressed during a restack) and the unlock event
                     -- often never comes. See BagFrame:WatchLockedSlots.
                     BagFrame:WatchLockedSlots()
+
+                    -- Record what the SCREEN looks like, into the same timeline
+                    -- as the engine's move log. The engine can only report what
+                    -- the container API told it; this reports what the player
+                    -- actually sees, and the two disagreeing is the whole
+                    -- question -- a button greyed while its slot reads unlocked
+                    -- is a display bug and nothing in SortEngine can fix it.
+                    if SortEngine.LogRestack then
+                        local greyed = 0
+                        for button in ItemButton:GetActiveButtons() do
+                            local d = button.itemData
+                            local overlayOn = button.lockOverlay and button.lockOverlay:IsShown()
+                            local dimmed = button:GetAlpha() < 0.99
+                            if d and d.itemID and (overlayOn or dimmed) then
+                                greyed = greyed + 1
+                                local live = d.bagID and d.slot
+                                    and C_Container.GetContainerItemInfo(d.bagID, d.slot)
+                                SortEngine:LogRestack(
+                                    "UI: %s:%s item=%s lockOverlay=%s alpha=%.2f cached.locked=%s live.isLocked=%s",
+                                    tostring(d.bagID), tostring(d.slot), tostring(d.itemID),
+                                    overlayOn and "ON" or "off", button:GetAlpha(),
+                                    tostring(d.locked),
+                                    tostring(live and live.isLocked))
+                            end
+                        end
+                        SortEngine:LogRestack("UI: refresh done, %d button(s) greyed or dimmed", greyed)
+                    end
                 end
             end)
         end)
@@ -2556,10 +2583,27 @@ local function StartLockWatch(bagID, slotID)
         -- Stop once the slot has been unlocked and unchanged for ~0.6s, or after
         -- a generous timeout (slow servers can take seconds to settle a swap).
         if (not locked and stableTicks >= 3) or ticks >= 75 then
+            -- Reconcile once on the way out. A slot whose lock never flips
+            -- produces no `changed` tick at all, so the loop above would give up
+            -- after ~15s having never repainted anything -- silently leaving the
+            -- button grey even if the scan record and the API had since agreed.
+            if locked then
+                ReconcileSlot(bagID, slotID)
+            end
             lockWatchActive[key] = nil
             self:Cancel()
         end
     end)
+end
+
+local function WatchLockedSlotsInBag(bagID)
+    local numSlots = C_Container.GetContainerNumSlots(bagID) or 0
+    for slot = 1, numSlots do
+        local info = C_Container.GetContainerItemInfo(bagID, slot)
+        if info and info.isLocked then
+            StartLockWatch(bagID, slot)
+        end
+    end
 end
 
 --- Hand every still-locked bag slot to the lock watcher.
@@ -2579,13 +2623,13 @@ function BagFrame:WatchLockedSlots()
     if not (frame and frame:IsShown()) then return end
 
     for _, bagID in ipairs(Constants.BAG_IDS) do
-        local numSlots = C_Container.GetContainerNumSlots(bagID) or 0
-        for slot = 1, numSlots do
-            local info = C_Container.GetContainerItemInfo(bagID, slot)
-            if info and info.isLocked then
-                StartLockWatch(bagID, slot)
-            end
-        end
+        WatchLockedSlotsInBag(bagID)
+    end
+    -- The keyring is not in Constants.BAG_IDS but is scanned like any other bag
+    -- (see Data\BagScanner.lua), so it can strand a locked slot the loop above
+    -- would never look at. KEYRING_BAG_ID is nil on expansions without one.
+    if Constants.KEYRING_BAG_ID then
+        WatchLockedSlotsInBag(Constants.KEYRING_BAG_ID)
     end
 end
 
