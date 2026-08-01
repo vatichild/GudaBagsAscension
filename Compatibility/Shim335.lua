@@ -18,6 +18,21 @@ local report = { native = {}, polyfilled = {}, missingGlobals = {}, notes = {} }
 local function markNative(name)      report.native[name] = true end
 local function markPolyfilled(name)  report.polyfilled[name] = true end
 
+-- Sound playback for the whole addon. Defined UP HERE, before any polyfill can
+-- fail, because it is called from click handlers: if anything below aborts this
+-- file part-way, a missing sound must not turn into "attempt to call method
+-- 'PlaySound' (a nil value)" on every button press. ns.Sounds is filled in by
+-- the SOUNDKIT section further down; until then every id is simply nil and this
+-- is a no-op.
+--
+-- Never touches the global PlaySound: Blizzard code and other addons call that
+-- too, and swallowing their errors is not ours to decide.
+function ns:PlaySound(kit)
+    if kit == nil then return end
+    pcall(_G.PlaySound, kit)
+end
+ns.Sounds = {}
+
 -- Record whether a global the shim RELIES ON actually exists on this client.
 local function requireGlobal(name)
     local exists = _G[name] ~= nil
@@ -752,27 +767,64 @@ end
 -------------------------------------------------------------------------
 -- 11b. ColorMixin / CreateColor  (Legion 7.0)
 --      Needed before the SetGradient polyfill below, which consumes them.
--------------------------------------------------------------------------
+--
+-- ColorMixin is defined UNCONDITIONALLY, and that is the whole point.
+--
+-- It used to live inside the "CreateColor is missing" branch below. This client
+-- HAS CreateColor but NOT ColorMixin, so that branch was skipped, ColorMixin
+-- stayed nil, and the RAID_CLASS_COLORS loop right after called Mixin(color, nil).
+-- Ascension's Mixin asserts on a nil mixin, and the assert killed the main chunk
+-- of this file: every polyfill past that point (11c widget methods, 11d SOUNDKIT
+-- and friends, the sort no-ops, and the diagnostic report itself) silently never
+-- ran. Two "existence" checks, CreateColor and ColorMixin, were treated as one.
+--
+-- The methods live in a file-local table we own outright, and the global is only
+-- set when the client has none -- writing into a table this addon did not create
+-- is exactly the trap that cost a day on SOUNDKIT.
+local ColorMethods = {}
+function ColorMethods:GetRGB()  return self.r, self.g, self.b end
+function ColorMethods:GetRGBA() return self.r, self.g, self.b, self.a end
+function ColorMethods:SetRGBA(r, g, b, a) self.r, self.g, self.b, self.a = r, g, b, a end
+function ColorMethods:SetRGB(r, g, b) self:SetRGBA(r, g, b, 1) end
+function ColorMethods:IsEqualTo(o) return o and self.r == o.r and self.g == o.g
+                                        and self.b == o.b and self.a == o.a end
+function ColorMethods:GenerateHexColor()
+    return ("ff%02x%02x%02x"):format(
+        math.floor((self.r or 0) * 255 + 0.5),
+        math.floor((self.g or 0) * 255 + 0.5),
+        math.floor((self.b or 0) * 255 + 0.5))
+end
+function ColorMethods:WrapTextInColorCode(text)
+    return "|c" .. self:GenerateHexColor() .. tostring(text) .. "|r"
+end
+
+if type(ColorMixin) == "table" then
+    markNative("ColorMixin")
+else
+    markPolyfilled("ColorMixin")
+    ColorMixin = ColorMethods
+end
+
+-- Mix ColorMethods (never the global, which may be the client's own and may be
+-- missing the methods we rely on) into a plain colour table. Nil-safe: a colour
+-- table that never gains WrapTextInColorCode is a cosmetic loss, not a reason to
+-- abort the file.
+local function MixinColorMethods(t)
+    if type(t) ~= "table" then return end
+    if type(Mixin) == "function" then
+        pcall(Mixin, t, ColorMethods)
+    else
+        for name, fn in pairs(ColorMethods) do
+            if t[name] == nil then t[name] = fn end
+        end
+    end
+end
+
 if type(CreateColor) == "function" then markNative("CreateColor") else
     markPolyfilled("CreateColor")
-    ColorMixin = ColorMixin or {}
-    function ColorMixin:GetRGB()  return self.r, self.g, self.b end
-    function ColorMixin:GetRGBA() return self.r, self.g, self.b, self.a end
-    function ColorMixin:SetRGBA(r, g, b, a) self.r, self.g, self.b, self.a = r, g, b, a end
-    function ColorMixin:SetRGB(r, g, b) self:SetRGBA(r, g, b, 1) end
-    function ColorMixin:IsEqualTo(o) return o and self.r == o.r and self.g == o.g
-                                            and self.b == o.b and self.a == o.a end
-    function ColorMixin:GenerateHexColor()
-        return ("ff%02x%02x%02x"):format(
-            math.floor((self.r or 0) * 255 + 0.5),
-            math.floor((self.g or 0) * 255 + 0.5),
-            math.floor((self.b or 0) * 255 + 0.5))
-    end
-    function ColorMixin:WrapTextInColorCode(text)
-        return "|c" .. self:GenerateHexColor() .. tostring(text) .. "|r"
-    end
     function CreateColor(r, g, b, a)
-        local c = Mixin({}, ColorMixin)
+        local c = {}
+        MixinColorMethods(c)
         c:SetRGBA(r, g, b, a == nil and 1 or a)
         return c
     end
@@ -785,7 +837,7 @@ do
     if type(RAID_CLASS_COLORS) == "table" then
         for _, color in pairs(RAID_CLASS_COLORS) do
             if type(color) == "table" and type(color.WrapTextInColorCode) ~= "function" then
-                Mixin(color, ColorMixin)
+                MixinColorMethods(color)
             end
         end
         markPolyfilled("RAID_CLASS_COLORS:ColorMixin")
@@ -801,7 +853,7 @@ do
         if type(_G[name]) ~= "table" then
             _G[name] = CreateColor(rgb[1], rgb[2], rgb[3], 1)
         elseif type(_G[name].WrapTextInColorCode) ~= "function" then
-            Mixin(_G[name], ColorMixin)
+            MixinColorMethods(_G[name])
         end
     end
 end
@@ -860,6 +912,44 @@ local widgetPolyfillOK, widgetPolyfillErr = pcall(function()
         end
         if applied then markPolyfilled("widget:" .. name)
         elseif native then markNative("widget:" .. name) end
+    end
+
+    -- Animation:SetFromAlpha / SetToAlpha  (Cata 4.0)
+    --
+    -- WotLK has animations, but an Alpha animation is expressed as a single
+    -- SetChange(delta) applied to the region's CURRENT alpha -- there is no
+    -- absolute from/to. Remember whichever endpoint was set and convert as soon
+    -- as both are known, so the retail two-call form keeps working.
+    --
+    -- The Alpha metatable is not reachable from a frame: it needs an actual
+    -- animation, which needs an animation group. Guarded like every other probe
+    -- here, since a client without animations must cost only this polyfill.
+    do
+        local okAnim, anim = pcall(function()
+            return probeFrame:CreateAnimationGroup():CreateAnimation("Alpha")
+        end)
+        if okAnim and anim then
+            local mt = getmetatable(anim)
+            if mt and type(mt.__index) == "table" then
+                metas.Alpha = mt.__index
+
+                local function applyChange(self)
+                    -- Only once both ends are known; a lone SetFromAlpha says
+                    -- nothing about the delta.
+                    if self.__gbFromAlpha and self.__gbToAlpha and self.SetChange then
+                        self:SetChange(self.__gbToAlpha - self.__gbFromAlpha)
+                    end
+                end
+                polyfillMethod({ "Alpha" }, "SetFromAlpha", function(self, v)
+                    self.__gbFromAlpha = v
+                    applyChange(self)
+                end)
+                polyfillMethod({ "Alpha" }, "SetToAlpha", function(self, v)
+                    self.__gbToAlpha = v
+                    applyChange(self)
+                end)
+            end
+        end
     end
 
     -- Region:SetSize / SetShown / SetEnabled  (Cata 4.0 / MoP 5.0)
@@ -1020,30 +1110,63 @@ end
 -- 11d. Remaining Legion+ globals with no WotLK equivalent
 -------------------------------------------------------------------------
 
--- SOUNDKIT (7.0). On WotLK PlaySound takes a NAME STRING, not a numeric kit id,
--- so map the ids the addon uses to their 3.3.5a names and keep PlaySound working
--- whichever form it is handed.
-if type(SOUNDKIT) == "table" then markNative("SOUNDKIT") else
-    markPolyfilled("SOUNDKIT")
-    SOUNDKIT = setmetatable({
-        IG_BACKPACK_OPEN        = "igBackPackOpen",
-        IG_BACKPACK_CLOSE       = "igBackPackClose",
-        IG_MAINMENU_OPTION      = "igMainMenuOption",
-        IG_CHARACTER_INFO_TAB   = "igCharacterInfoTab",
-        IG_MAINMENU_OPEN        = "igMainMenuOpen",
-        IG_MAINMENU_CLOSE       = "igMainMenuClose",
-        U_CHAT_SCROLL_BUTTON    = "UChatScrollButton",
-    }, { __index = function() return "igMainMenuOption" end })
+-- SOUNDKIT (7.0) -> ns.Sounds.
+--
+-- Resolved into a table of OUR OWN. Two earlier attempts wrote into the client's
+-- SOUNDKIT with rawset instead, and both failed the same way: a client-provided
+-- enum table can be read-only, the rawset throws, and the throw aborts the REST
+-- OF THIS FILE. That is why ns:PlaySound ended up nil while the sound keys still
+-- looked unfixed -- one silent error, two misleading symptoms. Never write to a
+-- table this addon does not own.
+--
+-- Three clients to satisfy:
+--  * Stock 3.3.5a: no SOUNDKIT at all, and PlaySound takes a NAME STRING.
+--  * Ascension: ships a 771-entry SOUNDKIT with its own naming and NO IG_* keys,
+--    so every retail name resolves to nil.
+--  * Anything later that renames again: falls through to the 3.3.5a name, and
+--    ns:PlaySound pcalls, so the worst case is a missing click noise.
+--
+-- Candidates are tried in order: retail name first (so a client that does ship
+-- the retail key wins), then the names this client really has, verified against
+-- the SOUNDKIT dump in the GudaBagsProbe saved variables.
+local SOUND_CANDIDATES = {
+    RESTACK     = { "IG_BACKPACK_OPEN",      "UI_BAGSORTING_01", "PUT_DOWN_BAG", "PICK_UP_BAG" },
+    MENU_OPTION = { "IG_MAINMENU_OPTION",    "UIMAINMENUBUTTONA", "CHAT_SCROLL_BUTTON" },
+    TAB         = { "IG_CHARACTER_INFO_TAB", "CHARACTER_SHEET_TAB", "UCHARACTERSHEETTAB" },
+}
 
-    local _PlaySound = PlaySound
-    if type(_PlaySound) == "function" then
-        PlaySound = function(sound, ...)
-            -- Numeric kit ids don't exist here; swallow them rather than error.
-            if type(sound) ~= "string" then return end
-            return _PlaySound(sound, ...)
+-- Last resort: stock 3.3.5a PlaySound name strings.
+local SOUND_NAMES_335 = {
+    RESTACK     = "igBackPackOpen",
+    MENU_OPTION = "igMainMenuOption",
+    TAB         = "igCharacterInfoTab",
+}
+
+do
+    local kit = type(SOUNDKIT) == "table" and SOUNDKIT or nil
+    if kit then markNative("SOUNDKIT") else markPolyfilled("SOUNDKIT") end
+
+    for name, candidates in pairs(SOUND_CANDIDATES) do
+        local resolved
+        if kit then
+            for _, key in ipairs(candidates) do
+                -- pcall: reading a protected table can throw just like writing one.
+                local ok, value = pcall(function() return kit[key] end)
+                if ok and value ~= nil then
+                    resolved = value
+                    markNative("sound:" .. name .. " = SOUNDKIT." .. key)
+                    break
+                end
+            end
         end
+        if resolved == nil then
+            resolved = SOUND_NAMES_335[name]
+            markPolyfilled("sound:" .. name .. " = " .. tostring(resolved))
+        end
+        ns.Sounds[name] = resolved
     end
 end
+
 
 -- GameTooltip:SetItemByID (6.0). WotLK can express the same thing with
 -- SetHyperlink. Two call sites (TrackedBar, QuestBar) call it unguarded.

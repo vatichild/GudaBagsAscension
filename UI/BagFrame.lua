@@ -2343,7 +2343,7 @@ function BagFrame:RestackAndClean()
     if not frame or not frame:IsShown() then return end
 
     -- Play sound feedback
-    PlaySound(SOUNDKIT.IG_BACKPACK_OPEN)
+    ns:PlaySound(ns.Sounds.RESTACK)
 
     -- Use SortEngine's restack function (consolidates stacks without sorting)
     local SortEngine = ns:GetModule("SortEngine")
@@ -2374,6 +2374,13 @@ function BagFrame:RestackAndClean()
                     -- Rescan and refresh
                     BagScanner:ScanAllBags()
                     BagFrame:Refresh()
+
+                    -- The scan above bakes in whatever isLocked says right now,
+                    -- and a slot the server has not released yet would stay
+                    -- desaturated forever: no watcher was started for it (they
+                    -- are suppressed during a restack) and the unlock event
+                    -- often never comes. See BagFrame:WatchLockedSlots.
+                    BagFrame:WatchLockedSlots()
                 end
             end)
         end)
@@ -2553,6 +2560,33 @@ local function StartLockWatch(bagID, slotID)
             self:Cancel()
         end
     end)
+end
+
+--- Hand every still-locked bag slot to the lock watcher.
+---
+--- StartLockWatch deliberately does nothing while SortEngine is running: a sort
+--- locks dozens of slots at once and has its own completion handling. The cost
+--- is that a restack which finishes with slots still locked leaves nobody
+--- watching them, and this client frequently sends no ITEM_LOCK_CHANGED for the
+--- *unlock* (the very reason the watcher exists). Those slots then stay
+--- desaturated with the lock overlay up until the next bag toggle.
+---
+--- Called from the restack callback, by which point restackInProgress is already
+--- false, so StartLockWatch no longer bails. Slots that are genuinely unlocked
+--- are skipped, so this is normally a handful of watchers at most.
+function BagFrame:WatchLockedSlots()
+    if viewingCharacter then return end
+    if not (frame and frame:IsShown()) then return end
+
+    for _, bagID in ipairs(Constants.BAG_IDS) do
+        local numSlots = C_Container.GetContainerNumSlots(bagID) or 0
+        for slot = 1, numSlots do
+            local info = C_Container.GetContainerItemInfo(bagID, slot)
+            if info and info.isLocked then
+                StartLockWatch(bagID, slot)
+            end
+        end
+    end
 end
 
 -- GET_ITEM_INFO_RECEIVED fires once per itemID as async item data finishes

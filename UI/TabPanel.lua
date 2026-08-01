@@ -148,7 +148,7 @@ local function CreateRetailTab(container, tabInfo, index, prevTab, selectFn)
     end
 
     tab:SetScript("OnClick", function()
-        PlaySound(SOUNDKIT and SOUNDKIT.IG_CHARACTER_INFO_TAB or 841)
+        ns:PlaySound(ns.Sounds.TAB)
         selectFn(tabInfo.id)
     end)
 

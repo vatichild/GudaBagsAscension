@@ -3639,7 +3639,7 @@ function BankFrame:RestackAndClean()
     end
 
     -- Play sound feedback
-    PlaySound(SOUNDKIT.IG_BACKPACK_OPEN)
+    ns:PlaySound(ns.Sounds.RESTACK)
 
     -- Use SortEngine's restack function (consolidates stacks without sorting)
     local SortEngine = ns:GetModule("SortEngine")

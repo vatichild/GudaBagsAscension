@@ -606,7 +606,7 @@ local function CreateDepositMoneyButton(parent)
     button:SetScript("OnClick", function(self)
         local canDeposit = C_Bank and C_Bank.CanDepositMoney and C_Bank.CanDepositMoney(Enum.BankType.Account)
         if canDeposit then
-            PlaySound(SOUNDKIT.IG_MAINMENU_OPTION)
+            ns:PlaySound(ns.Sounds.MENU_OPTION)
             -- Use Blizzard's string if available, fallback to custom
             local promptText = BANK_MONEY_DEPOSIT_PROMPT or "Enter amount to deposit:"
             ShowMoneyInput("deposit", promptText, function(copper)
@@ -640,7 +640,7 @@ local function CreateWithdrawMoneyButton(parent)
     button:SetScript("OnClick", function(self)
         local canWithdraw = C_Bank and C_Bank.CanWithdrawMoney and C_Bank.CanWithdrawMoney(Enum.BankType.Account)
         if canWithdraw then
-            PlaySound(SOUNDKIT.IG_MAINMENU_OPTION)
+            ns:PlaySound(ns.Sounds.MENU_OPTION)
             -- Use Blizzard's string if available, fallback to custom
             local promptText = BANK_MONEY_WITHDRAW_PROMPT or "Enter amount to withdraw:"
             ShowMoneyInput("withdraw", promptText, function(copper)
