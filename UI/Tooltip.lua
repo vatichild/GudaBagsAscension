@@ -8,6 +8,8 @@ local Database = ns:GetModule("Database")
 local Events = ns:GetModule("Events")
 local Utils = ns:GetModule("Utils")
 
+local CreateFrame = ns.CreateFrame or CreateFrame
+
 -- Track if we've already added inventory section to prevent duplicates
 local tooltipReady = true
 

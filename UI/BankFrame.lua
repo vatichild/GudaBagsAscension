@@ -16,6 +16,8 @@ local Utils = ns:GetModule("Utils")
 local CategoryHeaderPool = ns:GetModule("CategoryHeaderPool")
 local Theme = ns:GetModule("Theme")
 
+local CreateFrame = ns.CreateFrame or CreateFrame
+
 local BankHeader = nil
 local BankFooter = nil
 local RetailBankScanner = nil

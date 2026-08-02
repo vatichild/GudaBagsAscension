@@ -6,6 +6,9 @@ ns:RegisterModule("CategoryEditor", CategoryEditor)
 local Constants = ns.Constants
 local Events = ns:GetModule("Events")
 local Theme = ns:GetModule("Theme")
+local Utils = ns:GetModule("Utils")
+
+local CreateFrame = ns.CreateFrame or CreateFrame
 
 local frame
 local currentCategoryId
@@ -49,7 +52,7 @@ local function CreateDropdown(parent, width, items, onSelect)
     local dropdown = CreateFrame("Frame", "GudaBagsCategoryDropdown" .. genericDropdownCounter,
                                  parent, "UIDropDownMenuTemplate")
     dropdown:SetPoint("LEFT", parent, "LEFT", 0, 0)
-    UIDropDownMenu_SetWidth(dropdown, width - 30)
+    ns.DropDownSetWidth(dropdown, width - 30)
 
     local currentValue = nil
     local currentLabel = ""
@@ -67,7 +70,7 @@ local function CreateDropdown(parent, width, items, onSelect)
             info.func = function(self)
                 currentValue = self.value
                 currentLabel = self:GetText()
-                UIDropDownMenu_SetText(dropdown, currentLabel)
+                ns.DropDownSetText(dropdown, currentLabel)
                 if onSelect then
                     onSelect(currentValue)
                 end
@@ -85,7 +88,7 @@ local function CreateDropdown(parent, width, items, onSelect)
         else
             currentLabel = label or tostring(val)
         end
-        UIDropDownMenu_SetText(dropdown, currentLabel)
+        ns.DropDownSetText(dropdown, currentLabel)
     end
 
     return dropdown
@@ -217,7 +220,7 @@ local function CreateRuleTypeDropdown(parent, index, onSelect)
     local dropdownName = "GudaBagsRuleTypeDropdown" .. dropdownCounter
 
     local dropdown = CreateFrame("Frame", dropdownName, parent, "UIDropDownMenuTemplate")
-    UIDropDownMenu_SetWidth(dropdown, 100)
+    ns.DropDownSetWidth(dropdown, 100)
 
     local currentTypeId = nil
 
@@ -228,7 +231,7 @@ local function CreateRuleTypeDropdown(parent, index, onSelect)
             info.value = rt.id
             info.func = function(self)
                 currentTypeId = self.value
-                UIDropDownMenu_SetText(dropdown, rt.shortLabel or rt.label)
+                ns.DropDownSetText(dropdown, rt.shortLabel or rt.label)
                 if onSelect then
                     onSelect(self.value)
                 end
@@ -249,7 +252,7 @@ local function CreateRuleTypeDropdown(parent, index, onSelect)
         -- Find the label for this type
         for _, rt in ipairs(RULE_TYPES) do
             if rt.id == typeId then
-                UIDropDownMenu_SetText(dropdown, rt.shortLabel or rt.label)
+                ns.DropDownSetText(dropdown, rt.shortLabel or rt.label)
                 break
             end
         end
@@ -304,7 +307,7 @@ local function CreateRuleRow(parent, index)
             return
         end
         if currentRules[index] then
-            if self:GetChecked() then
+            if Utils:GetChecked(self) then
                 currentRules[index].required = true
             else
                 currentRules[index].required = nil
@@ -389,7 +392,7 @@ local function UpdateRuleRowValue(row, ruleType, ruleValue)
         cb:SetSize(24, 24)
         cb:SetChecked(ruleValue == true)
         cb:SetScript("OnClick", function(self)
-            currentRules[row.index].value = self:GetChecked()
+            currentRules[row.index].value = Utils:GetChecked(self)
         end)
         if ruleInfo.tooltip then
             cb:SetScript("OnEnter", function(self)
@@ -588,8 +591,8 @@ local function CreateEditorFrame()
     f:EnableMouse(true)
 
     -- Hide portrait and button bar for clean look
-    ButtonFrameTemplate_HidePortrait(f)
-    ButtonFrameTemplate_HideButtonBar(f)
+    if f.HidePortrait then f:HidePortrait() end
+    if f.HideButtonBar then f:HideButtonBar() end
     if f.Inset then
         f.Inset:Hide()
     end

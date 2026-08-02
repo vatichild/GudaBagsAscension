@@ -3,6 +3,8 @@ local addonName, ns = ...
 -- Classic Era and TBC feature guard
 -- Keyring exists in Classic Era and TBC, removed in later expansions
 local Expansion = ns:GetModule("Expansion")
+
+local CreateFrame = ns.CreateFrame or CreateFrame
 if not Expansion.Features.HasKeyring then
     -- Register empty stub module for non-TBC expansions
     ns:RegisterModule("Footer.Keyring", {

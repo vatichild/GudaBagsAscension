@@ -3,6 +3,8 @@ local addonName, ns = ...
 local TabPanel = {}
 ns:RegisterModule("TabPanel", TabPanel)
 
+local CreateFrame = ns.CreateFrame or CreateFrame
+
 -- Global counter for unique tab names
 local tabCounter = 0
 

@@ -11,6 +11,8 @@ local Font = ns:GetModule("Font")
 local Theme = ns:GetModule("Theme")
 local Utils = ns:GetModule("Utils")
 
+local CreateFrame = ns.CreateFrame or CreateFrame
+
 local MailHeader = nil
 local MailFooter = nil
 local MailScanner = nil

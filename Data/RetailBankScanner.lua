@@ -1,5 +1,7 @@
 local addonName, ns = ...
 
+local CreateFrame = ns.CreateFrame or CreateFrame
+
 -- Only load on Retail
 if not ns.IsRetail then return end
 

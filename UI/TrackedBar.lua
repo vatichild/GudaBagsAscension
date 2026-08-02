@@ -10,6 +10,8 @@ local Events = ns:GetModule("Events")
 local Font = ns:GetModule("Font")
 local Utils = ns:GetModule("Utils")
 
+local CreateFrame = ns.CreateFrame or CreateFrame
+
 -- Local state
 local frame = nil
 local itemButtons = {}

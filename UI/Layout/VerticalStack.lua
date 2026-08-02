@@ -3,6 +3,8 @@ local addonName, ns = ...
 local VerticalStack = {}
 ns:RegisterModule("Layout.VerticalStack", VerticalStack)
 
+local CreateFrame = ns.CreateFrame or CreateFrame
+
 local DEFAULT_SPACING = 8
 
 function VerticalStack:Create(parent, config)

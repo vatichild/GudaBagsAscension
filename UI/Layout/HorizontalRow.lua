@@ -3,6 +3,8 @@ local addonName, ns = ...
 local HorizontalRow = {}
 ns:RegisterModule("Layout.HorizontalRow", HorizontalRow)
 
+local CreateFrame = ns.CreateFrame or CreateFrame
+
 local DEFAULT_SPACING = 4
 local DEFAULT_HEIGHT = 22
 

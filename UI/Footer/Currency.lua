@@ -2,6 +2,8 @@ local addonName, ns = ...
 
 -- Feature guard
 local Expansion = ns:GetModule("Expansion")
+
+local CreateFrame = ns.CreateFrame or CreateFrame
 if not Expansion.Features.HasCurrency then
     ns:RegisterModule("Footer.Currency", {
         Init = function() return nil end,

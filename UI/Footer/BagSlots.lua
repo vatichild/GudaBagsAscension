@@ -8,6 +8,8 @@ local Theme = ns:GetModule("Theme")
 
 local Database = ns:GetModule("Database")
 
+local CreateFrame = ns.CreateFrame or CreateFrame
+
 local frame = nil
 local bagFlyout = nil
 local bagFlyoutExpanded = false

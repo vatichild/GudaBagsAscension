@@ -2,6 +2,8 @@ local addonName, ns = ...
 
 -- Guild Bank is available in TBC and later (check feature flag)
 local Constants = ns.Constants
+
+local CreateFrame = ns.CreateFrame or CreateFrame
 if not Constants or not Constants.FEATURES or not Constants.FEATURES.GUILD_BANK then
     return
 end

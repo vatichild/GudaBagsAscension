@@ -5,6 +5,9 @@ ns:RegisterModule("SettingsPopup", SettingsPopup)
 
 local Events = ns:GetModule("Events")
 local Theme = ns:GetModule("Theme")
+local Utils = ns:GetModule("Utils")
+
+local CreateFrame = ns.CreateFrame or CreateFrame
 
 -- Components (loaded after this file via TOC order)
 local Slider, Checkbox, ToggleButton, Select
@@ -13,6 +16,11 @@ local TabPanel, SettingsSchema
 
 local frame
 local tabPanel
+
+-- Forward declaration. This used to be a bare `function RefreshCategoriesList()`
+-- at :1048 with no `local`, which exported a very generic name into _G along
+-- with everything it closes over. Assigned below -- do NOT add `local` there.
+local RefreshCategoriesList
 
 local Constants = ns.Constants
 local L = ns.L
@@ -274,7 +282,9 @@ local function CreateGroupHeader(parent, groupName, yOffset, groupIndex)
     mergeCB:SetChecked(mergedGroups[groupName] == true)
     mergeCB:SetScript("OnClick", function(self)
         local current = Database:GetSetting("mergedGroups") or {}
-        current[groupName] = self:GetChecked()
+        -- Utils:GetChecked, not the raw method: pre-Cata returns 1/nil, and a nil
+        -- stored here DELETES the key instead of recording "off".
+        current[groupName] = Utils:GetChecked(self)
         Database:SetSetting("mergedGroups", current)
         Events:Fire("SETTING_CHANGED", "mergedGroups", current)
     end)
@@ -1040,6 +1050,8 @@ local function ReleaseFrame(frame)
     -- child frames and cause issues with WoW's frame system
 end
 
+-- Assigns to the local forward-declared at the top of the file -- do NOT add
+-- `local` here.
 function RefreshCategoriesList()
     if not categoriesScrollChild then return end
 
@@ -1235,7 +1247,7 @@ local function CreateCategoriesTab(parent)
 
         -- Set all groups to checked/unchecked state
         local newMerged = {}
-        local checked = self:GetChecked()
+        local checked = Utils:GetChecked(self)
         for groupName, _ in pairs(groups) do
             newMerged[groupName] = checked
         end
@@ -1444,8 +1456,8 @@ local function CreateSettingsFrame()
     tinsert(UISpecialFrames, "GudaBagsSettingsPopup")
 
     -- Hide portrait and button bar
-    ButtonFrameTemplate_HidePortrait(f)
-    ButtonFrameTemplate_HideButtonBar(f)
+    if f.HidePortrait then f:HidePortrait() end
+    if f.HideButtonBar then f:HideButtonBar() end
     if f.Inset then
         f.Inset:Hide()
     end

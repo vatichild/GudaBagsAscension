@@ -4,6 +4,8 @@ local Events = {}
 ns:RegisterModule("Events", Events)
 
 local callbacks = {}
+
+local CreateFrame = ns.CreateFrame or CreateFrame
 local eventFrame = CreateFrame("Frame")
 
 -- Events this client does not have, mapped to the closest one it does. When

@@ -5,6 +5,8 @@ ns:RegisterModule("ItemScanner", ItemScanner)
 
 local Constants = ns.Constants
 
+local CreateFrame = ns.CreateFrame or CreateFrame
+
 -- Get inventory slot for bank bag (same logic as BankFooter for API consistency)
 local function GetBankBagInvSlot(bankBagIndex)
     if ContainerIDToInventoryID then

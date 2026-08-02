@@ -6,6 +6,8 @@ ns:RegisterModule("Controls.Select", Select)
 local Database = ns:GetModule("Database")
 local Events = ns:GetModule("Events")
 
+local CreateFrame = ns.CreateFrame or CreateFrame
+
 local DEFAULT_HEIGHT = 26
 
 function Select:Create(parent, config)

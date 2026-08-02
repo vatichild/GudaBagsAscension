@@ -6,6 +6,8 @@ ns:RegisterModule("Controls.ToggleButton", ToggleButton)
 local Database = ns:GetModule("Database")
 local Events = ns:GetModule("Events")
 
+local CreateFrame = ns.CreateFrame or CreateFrame
+
 local DEFAULT_HEIGHT = 26
 
 function ToggleButton:Create(parent, config)

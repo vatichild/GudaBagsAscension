@@ -8,6 +8,8 @@ local L = ns.L
 local Database = ns:GetModule("Database")
 local Font = ns:GetModule("Font")
 
+local CreateFrame = ns.CreateFrame or CreateFrame
+
 local DROPDOWN_WIDTH = 160
 local ROW_HEIGHT = 20
 local PADDING = 8

@@ -6,6 +6,8 @@ ns:RegisterModule("Controls.Slider", Slider)
 local Database = ns:GetModule("Database")
 local Events = ns:GetModule("Events")
 
+local CreateFrame = ns.CreateFrame or CreateFrame
+
 local DEFAULT_HEIGHT = 26
 
 -- Unique names for OptionsSliderTemplate instances; see the fallback branch in
@@ -53,7 +55,9 @@ function Slider:Create(parent, config)
         local steps = config.max - config.min
         slider:Init(currentValue, config.min, config.max, steps, {
             [MinimalSliderWithSteppersMixin.Label.Right] = CreateMinimalSliderFormatter(MinimalSliderWithSteppersMixin.Label.Right, function(value)
-                return WHITE_FONT_COLOR:WrapTextInColorCode(FormatValue(value))
+                -- ns.FontColor, not the Blizzard global: WotLK's WHITE_FONT_COLOR
+                -- has no ColorMixin methods, and the shim no longer mixes them in.
+                return ns.FontColor("WHITE"):WrapTextInColorCode(FormatValue(value))
             end)
         })
 

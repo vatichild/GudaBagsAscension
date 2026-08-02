@@ -6,6 +6,8 @@ ns:RegisterModule("Theme", Theme)
 local Database = ns:GetModule("Database")
 local Events = ns:GetModule("Events")
 
+local CreateFrame = ns.CreateFrame or CreateFrame
+
 -------------------------------------------------
 -- Theme Definitions
 -------------------------------------------------
@@ -178,9 +180,11 @@ local function EnsureBlizzardBg(frame)
     bliz:EnableMouse(false)
     bliz:SetFrameLevel(frame:GetFrameLevel())
 
-    -- Hide all ButtonFrameTemplate UI elements
-    if ButtonFrameTemplate_HidePortrait then ButtonFrameTemplate_HidePortrait(bliz) end
-    if ButtonFrameTemplate_HideButtonBar then ButtonFrameTemplate_HideButtonBar(bliz) end
+    -- Hide all ButtonFrameTemplate UI elements.
+    -- Methods on our substitute frame, not the FrameXML globals -- the shim no
+    -- longer overrides those (they were a taint vector for every Blizzard caller).
+    if bliz.HidePortrait then bliz:HidePortrait() end
+    if bliz.HideButtonBar then bliz:HideButtonBar() end
     if bliz.Inset then bliz.Inset:Hide() end
     if bliz.CloseButton then bliz.CloseButton:Hide() end
     if bliz.TitleContainer then bliz.TitleContainer:Hide() end
@@ -305,6 +309,11 @@ function Theme:ApplyFrameBackground(frame, bgAlpha, showBorders)
     if useMetal then
         -- Hide other theme elements
         if frame.blizzardBg then frame.blizzardBg:Hide() end
+        -- Clearing the backdrop is what makes a later SetBackdropColor a null
+        -- dereference (ERROR #132). ns.CreateFrame already stamped the guard on
+        -- anything we created; this is the belt for a frame that reached us by
+        -- some other route. Idempotent.
+        if ns.GuardBackdrop then ns.GuardBackdrop(frame) end
         if frame.SetBackdrop then frame:SetBackdrop(nil) end
         if frame.themeBg then frame.themeBg:Hide() end
         -- Create/show metal frame
@@ -381,6 +390,7 @@ function Theme:ApplyFrameBackground(frame, bgAlpha, showBorders)
         end
 
         -- Clear the main frame backdrop entirely
+        if ns.GuardBackdrop then ns.GuardBackdrop(frame) end
         frame:SetBackdrop(nil)
 
         -- Hide the old themeBg texture if it exists from previous approach

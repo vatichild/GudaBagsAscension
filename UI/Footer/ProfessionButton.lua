@@ -17,6 +17,8 @@ ns:RegisterModule("Footer.ProfessionButton", ProfessionButton)
 local Constants = ns.Constants
 local L = ns.L
 
+local CreateFrame = ns.CreateFrame or CreateFrame
+
 local Database  -- lazy-initialized on first OnUpdate
 
 local POLL_INTERVAL = 0.1

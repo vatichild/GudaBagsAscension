@@ -9,6 +9,8 @@ local Events = ns:GetModule("Events")
 local Font = ns:GetModule("Font")
 local Utils = ns:GetModule("Utils")
 
+local CreateFrame = ns.CreateFrame or CreateFrame
+
 -- Iterate backpack + 4 bag slots + reagent bag (Retail only — Constants.REAGENT_BAG is nil on Classic).
 local MAX_PLAYER_BAG = Constants.REAGENT_BAG or Constants.PLAYER_BAG_MAX
 
@@ -542,10 +544,10 @@ local function UpdateButton(button, itemData)
 
     -- Show inner shadow with sunny color
     if button.innerShadow then
-        button.innerShadow.top:SetGradient("VERTICAL", CreateColor(sunnyR, sunnyG, sunnyB, 0), CreateColor(sunnyR, sunnyG, sunnyB, 0.6))
-        button.innerShadow.bottom:SetGradient("VERTICAL", CreateColor(sunnyR, sunnyG, sunnyB, 0.6), CreateColor(sunnyR, sunnyG, sunnyB, 0))
-        button.innerShadow.left:SetGradient("HORIZONTAL", CreateColor(sunnyR, sunnyG, sunnyB, 0.6), CreateColor(sunnyR, sunnyG, sunnyB, 0))
-        button.innerShadow.right:SetGradient("HORIZONTAL", CreateColor(sunnyR, sunnyG, sunnyB, 0), CreateColor(sunnyR, sunnyG, sunnyB, 0.6))
+        Utils:SetGradient(button.innerShadow.top, "VERTICAL", CreateColor(sunnyR, sunnyG, sunnyB, 0), CreateColor(sunnyR, sunnyG, sunnyB, 0.6))
+        Utils:SetGradient(button.innerShadow.bottom, "VERTICAL", CreateColor(sunnyR, sunnyG, sunnyB, 0.6), CreateColor(sunnyR, sunnyG, sunnyB, 0))
+        Utils:SetGradient(button.innerShadow.left, "HORIZONTAL", CreateColor(sunnyR, sunnyG, sunnyB, 0.6), CreateColor(sunnyR, sunnyG, sunnyB, 0))
+        Utils:SetGradient(button.innerShadow.right, "HORIZONTAL", CreateColor(sunnyR, sunnyG, sunnyB, 0), CreateColor(sunnyR, sunnyG, sunnyB, 0.6))
         for _, tex in pairs(button.innerShadow) do tex:Show() end
     end
 

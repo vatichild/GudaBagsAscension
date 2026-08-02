@@ -24,6 +24,8 @@ local addonName, ns = ...
 -- table and publish it at ADDON_LOADED, once the restore has already happened.
 local entries = {}
 
+local CreateFrame = ns.CreateFrame or CreateFrame
+
 local MAX_ENTRIES   = 60      -- distinct messages retained
 local MAX_MSG_LEN   = 800
 local MAX_EVENTS    = 2000    -- hard stop: after this the sink disables itself
@@ -82,8 +84,29 @@ do
     end)
 end
 
+-- Messages that must NEVER be rate-limited away.
+--
+-- Taint and blocked-action errors are the ones you are most likely to be
+-- actively hunting, and they repeat -- a tainted execution path usually fires
+-- again every time the UI it poisoned runs. Suppressing them after
+-- MAX_FORWARDS hid exactly the diagnostic that mattered.
+local ALWAYS_FORWARD = {
+    "tainted the call",
+    "ADDON_ACTION_BLOCKED",
+    "ADDON_ACTION_FORBIDDEN",
+    "blocked from an action",
+}
+
+local function isAlwaysForwarded(msg)
+    for i = 1, #ALWAYS_FORWARD do
+        if msg:find(ALWAYS_FORWARD[i], 1, true) then return true end
+    end
+    return false
+end
+
 --- True while this message still deserves to reach the normal error display.
 local function shouldForward(msg)
+    if isAlwaysForwarded(msg) then return true end
     local entry = seen[msg]
     return (not entry) or entry.count <= MAX_FORWARDS
 end
@@ -117,8 +140,14 @@ do
 
             -- debugstack is expensive: only walk the stack for a message we
             -- have never seen. Repeats skip it entirely.
+            --
+            -- Skipped for taint/blocked messages too: the client raises those
+            -- with no usable Lua stack (the recorded ERROR_HANDLER_DATABASE
+            -- entry has an empty `stack` field), so walking it costs time inside
+            -- a handler that now runs for every error in the client and returns
+            -- nothing worth reading.
             local stack
-            if not seen[text] and debugstack then
+            if not seen[text] and debugstack and not isAlwaysForwarded(text) then
                 stack = debugstack(2, 12, 12)
             end
 

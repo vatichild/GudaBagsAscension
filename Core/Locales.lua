@@ -7,6 +7,8 @@ local addonName, ns = ...
 -- Store reference to all locales for language switching
 local AllLocales = ns.Locales
 
+local CreateFrame = ns.CreateFrame or CreateFrame
+
 -- Start with English as the base (fallback for missing translations)
 ns.L = {}
 for key, value in pairs(AllLocales.enUS) do

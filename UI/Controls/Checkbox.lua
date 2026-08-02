@@ -5,6 +5,9 @@ ns:RegisterModule("Controls.Checkbox", Checkbox)
 
 local Database = ns:GetModule("Database")
 local Events = ns:GetModule("Events")
+local Utils = ns:GetModule("Utils")
+
+local CreateFrame = ns.CreateFrame or CreateFrame
 
 local DEFAULT_HEIGHT = 26
 
@@ -42,7 +45,7 @@ function Checkbox:Create(parent, config)
         -- Coerce to a real boolean: pre-Cata GetChecked returns 1 or NIL, and
         -- SetSetting assigns straight into the settings table -- so a nil would
         -- DELETE the key and silently revert the setting to its default.
-        local checked = self:GetChecked() and true or false
+        local checked = Utils:GetChecked(self)
         Database:SetSetting(config.key, checked)
         Events:Fire("SETTING_CHANGED", config.key, checked)
     end)
@@ -63,7 +66,7 @@ function Checkbox:Create(parent, config)
     end
 
     -- Public API
-    container.GetValue = function() return checkbox:GetChecked() and true or false end
+    container.GetValue = function() return Utils:GetChecked(checkbox) end
     container.SetValue = function(self, v) checkbox:SetChecked(v) end
     container.GetSettingKey = function() return config.key end
     container.Refresh = function(self)

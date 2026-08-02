@@ -1,5 +1,7 @@
 local addonName, ns = ...
 
+local CreateFrame = ns.CreateFrame or CreateFrame
+
 -- Quiver/Ammo bags exist in Classic Era and TBC only (Hunter class feature).
 -- Retail removed quivers, ammo pouches, and ammunition in Cataclysm (4.0).
 local _, playerClass = UnitClass("player")

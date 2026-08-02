@@ -7,6 +7,8 @@ local Events = ns:GetModule("Events")
 local Constants = ns.Constants
 local L = ns.L
 
+local CreateFrame = ns.CreateFrame or CreateFrame
+
 local profileListScrollChild
 local profileRows = {}
 local importExportBox

@@ -356,6 +356,11 @@ do
         function frame:GetTitleText() return self.TitleText end
         function frame:SetPortraitToAsset() end
         function frame:SetPortraitToUnit() end
+        -- The substitute has no portrait and no button bar, so hiding them is a
+        -- no-op. Methods, not globals -- see the note where the old global
+        -- overrides used to live.
+        function frame:HidePortrait() end
+        function frame:HideButtonBar() end
 
         return frame
     end
@@ -421,7 +426,22 @@ do
             :gsub(pattern, ""))
     end
 
-    CreateFrame = function(frameType, name, parent, template, id)
+    -- NOTE: this is deliberately NOT assigned to the global `CreateFrame`.
+    --
+    -- It used to be, and that made GudaBags the owner of every frame creation in
+    -- the client -- Blizzard's FrameXML, Ascension's own Lua UI, every other
+    -- addon. Secure code that calls an addon-owned global has its execution
+    -- tainted for the rest of its scope, and the next protected call in that
+    -- scope is blocked and blamed on us. That is what produced
+    -- "AddOn 'GudaBags' tainted the call of the secure function 'IsResponseSeen()'"
+    -- when opening the GM ticket UI (IsResponseSeen is Ascension's own protected
+    -- C_GMTicket function; its caller creates frames).
+    --
+    -- Nothing here was ever needed by a non-GudaBags caller: this client is
+    -- 3.3.5a, so no Blizzard code passes BackdropTemplate or any other post-4.0
+    -- template name. Every file in the addon takes it as a file-local instead:
+    --     local CreateFrame = ns.CreateFrame or CreateFrame
+    ns.CreateFrame = function(frameType, name, parent, template, id)
         local needsButtonFrame = false
 
         if type(template) == "string" then
@@ -439,6 +459,11 @@ do
         if needsButtonFrame then
             buildButtonFrameSubstitute(frame, name)
         end
+
+        -- Every frame the addon owns gets the backdrop crash guard stamped on it
+        -- (see section 11d). Blizzard's frames must not, which is exactly why
+        -- the guard cannot live on the shared widget metatables any more.
+        if frame and ns.GuardBackdrop then ns.GuardBackdrop(frame) end
 
         -- Record WHERE a top-level frame came from.
         --
@@ -458,13 +483,19 @@ do
 
     if not hasButtonFrameTemplate then markPolyfilled("ButtonFrameTemplate") end
 
-    -- Chrome helpers. Overridden UNCONDITIONALLY, not only when absent: since we
-    -- always substitute ButtonFrameTemplate above, the frames handed to these
-    -- helpers no longer have the portrait/button-bar children the real
-    -- implementations dereference, and the stock version would nil-error.
-    -- The substitute has no chrome to hide, so a no-op is the correct behaviour.
-    function ButtonFrameTemplate_HidePortrait() end
-    function ButtonFrameTemplate_HideButtonBar() end
+    -- Chrome helpers.
+    --
+    -- These used to be assigned to the FrameXML GLOBALS
+    -- ButtonFrameTemplate_HidePortrait / _HideButtonBar, unconditionally, so
+    -- every Blizzard caller of them ran GudaBags Lua and picked up our taint.
+    -- The reason they existed is real but narrow: we always substitute
+    -- ButtonFrameTemplate, so OUR frames lack the portrait/button-bar children
+    -- the stock helpers dereference and the stock version would nil-error.
+    --
+    -- That is a property of our substitute frames, so it belongs on the
+    -- substitute frames. buildButtonFrameSubstitute installs them as methods
+    -- (see :HidePortrait / :HideButtonBar there) and the addon's six call sites
+    -- call the method. Blizzard's globals are left alone.
 
     -- Note recorded lazily; flag captured for the report at PLAYER_LOGIN.
     report._backdropFlag = function() return usesBackdropTemplate end
@@ -739,9 +770,12 @@ NoopTable("C_AuctionHouse")              -- (8.3) new AH
 -------------------------------------------------------------------------
 -- 11. Assorted global helpers
 -------------------------------------------------------------------------
-if type(securecallfunction) ~= "function" then
-    function securecallfunction(func, ...) return func(...) end
-end
+-- securecallfunction is deliberately NOT defined here.
+--
+-- The shim used to publish `function securecallfunction(func, ...) return func(...) end`
+-- -- a security-named global that provides no security whatsoever. Nothing in
+-- GudaBags calls it (grep: zero sites), so it bought nothing, and leaving a
+-- fake behind for some other addon to find is worse than leaving it missing.
 if type(RunNextFrame) ~= "function" then
     function RunNextFrame(func) C_Timer.After(0, func) end
 end
@@ -830,39 +864,78 @@ if type(CreateColor) == "function" then markNative("CreateColor") else
     end
 end
 
--- Blizzard's global color objects are Legion-era. UI\Footer\Money.lua calls
+-- Blizzard's global colour objects are Legion-era. UI\Footer\Money.lua calls
 -- RAID_CLASS_COLORS[class]:WrapTextInColorCode(), but on WotLK those entries are
--- plain {r,g,b,colorStr} tables with no methods -- so mix the behaviour in.
+-- plain {r,g,b,colorStr} tables with no methods.
+--
+-- This used to mix the methods straight INTO Blizzard's tables. Writing into a
+-- table this addon did not create is the trap that cost a day on SOUNDKIT, and
+-- here it is worse than cosmetic: an addon-authored field on a Blizzard global
+-- makes that global tainted for every Blizzard reader of it.
+--
+-- So we never touch them. ns.ClassColor / ns.FontColor return addon-owned
+-- clones, built once on first use and cached. Blizzard's globals stay read-only
+-- to us. Call sites: ns.ClassColor(classToken), ns.FontColor("NORMAL"), ...
 do
-    if type(RAID_CLASS_COLORS) == "table" then
-        for _, color in pairs(RAID_CLASS_COLORS) do
-            if type(color) == "table" and type(color.WrapTextInColorCode) ~= "function" then
-                MixinColorMethods(color)
-            end
+    local FONT_COLOR_FALLBACK = {
+        WHITE     = { 1, 1, 1 },
+        NORMAL    = { 1, 0.82, 0 },
+        HIGHLIGHT = { 1, 1, 1 },
+        GRAY      = { 0.5, 0.5, 0.5 },
+        RED       = { 1, 0.125, 0.125 },
+        GREEN     = { 0.125, 1, 0.125 },
+    }
+
+    -- Copy the plain data out of a Blizzard colour table into one of ours.
+    local function cloneColor(src, r, g, b, a)
+        local c = {}
+        MixinColorMethods(c)
+        if type(src) == "table" then
+            c:SetRGBA(src.r or r or 1, src.g or g or 1, src.b or b or 1,
+                      src.a == nil and (a == nil and 1 or a) or src.a)
+            c.colorStr = src.colorStr
+        else
+            c:SetRGBA(r or 1, g or 1, b or 1, a == nil and 1 or a)
         end
-        markPolyfilled("RAID_CLASS_COLORS:ColorMixin")
+        return c
     end
-    for name, rgb in pairs({
-        WHITE_FONT_COLOR     = { 1, 1, 1 },
-        NORMAL_FONT_COLOR    = { 1, 0.82, 0 },
-        HIGHLIGHT_FONT_COLOR = { 1, 1, 1 },
-        GRAY_FONT_COLOR      = { 0.5, 0.5, 0.5 },
-        RED_FONT_COLOR       = { 1, 0.125, 0.125 },
-        GREEN_FONT_COLOR     = { 0.125, 1, 0.125 },
-    }) do
-        if type(_G[name]) ~= "table" then
-            _G[name] = CreateColor(rgb[1], rgb[2], rgb[3], 1)
-        elseif type(_G[name].WrapTextInColorCode) ~= "function" then
-            MixinColorMethods(_G[name])
-        end
+
+    local classCache = {}
+    function ns.ClassColor(classToken)
+        if not classToken then return nil end
+        local cached = classCache[classToken]
+        if cached then return cached end
+        local src = type(RAID_CLASS_COLORS) == "table" and RAID_CLASS_COLORS[classToken] or nil
+        if not src then return nil end
+        cached = cloneColor(src)
+        classCache[classToken] = cached
+        return cached
     end
+
+    local fontCache = {}
+    function ns.FontColor(key)
+        local cached = fontCache[key]
+        if cached then return cached end
+        local rgb = FONT_COLOR_FALLBACK[key] or FONT_COLOR_FALLBACK.WHITE
+        cached = cloneColor(_G[key .. "_FONT_COLOR"], rgb[1], rgb[2], rgb[3], 1)
+        fontCache[key] = cached
+        return cached
+    end
+
+    markPolyfilled("ns.ClassColor/ns.FontColor")
 end
 
 -------------------------------------------------------------------------
 -- 11c. Widget-method polyfills
 --      ~310 call sites across the UI use region methods added in 5.0-10.0.
---      Patching the shared metatables once is far safer than editing every
---      site, and it is a no-op wherever Ascension already backported one.
+--      Adding a MISSING method to a shared metatable is safe: a client that
+--      never had the method has no code that calls it, so only we ever reach it.
+--
+--      WRAPPING an existing method is not, and nothing in this section does it
+--      any more. A wrapper on a shared metatable runs GudaBags Lua for every
+--      Blizzard widget in the client, which taints secure execution -- see
+--      Core\Utils.lua for GetChecked/SetGradient and section 11c-bis for the
+--      backdrop crash guard, both of which moved out of here for that reason.
 -------------------------------------------------------------------------
 -- Wrapped in pcall: this section reaches into widget metatables, and a failure
 -- here must not abort the rest of the shim (which would leave the addon running
@@ -887,14 +960,10 @@ local widgetPolyfillOK, widgetPolyfillErr = pcall(function()
     addMeta("Frame",       probeFrame)
     addMeta("Button",      CreateProbe("Button"))
     addMeta("Cooldown",    CreateProbe("Cooldown"))
-    -- These carry their own metatables on some clients, and the addon applies
-    -- backdrops to all of them -- the SetBackdropColor crash guard below has to
-    -- reach every one.
-    addMeta("CheckButton", CreateProbe("CheckButton"))
-    addMeta("Slider",      CreateProbe("Slider"))
-    addMeta("ScrollFrame", CreateProbe("ScrollFrame"))
-    addMeta("EditBox",     CreateProbe("EditBox"))
-    addMeta("StatusBar",   CreateProbe("StatusBar"))
+    -- CheckButton / Slider / ScrollFrame / EditBox / StatusBar used to be probed
+    -- here too, purely so the SetBackdropColor crash guard could reach every
+    -- metatable. That guard is per-instance now (section 11c-bis), so those five
+    -- probe frames were five frames created at login for nothing.
 
     -- Apply `fn` as `name` on each listed metatable that lacks it.
     local function polyfillMethod(classes, name, fn)
@@ -970,69 +1039,35 @@ local widgetPolyfillOK, widgetPolyfillErr = pcall(function()
         self:SetVertexColor(r or 1, g or 1, b or 1, a == nil and 1 or a)
     end)
 
-    -- Texture:SetGradient -- must be WRAPPED, not conditionally added.
-    -- WotLK already HAS SetGradient, but with the pre-10.0 signature
-    -- (orientation, r1,g1,b1, r2,g2,b2) -- seven loose numbers, no alpha.
-    -- The addon calls the 10.0 form (orientation, colorObj, colorObj), so a
-    -- plain existence check would leave the native method in place and every
-    -- call would fail. Detect by argument type and route accordingly.
-    if metas.Texture then
-        local nativeGradient = metas.Texture.SetGradient
-        local nativeGradientAlpha = metas.Texture.SetGradientAlpha
-        metas.Texture.SetGradient = function(self, orientation, a, b, ...)
-            if type(a) == "table" then
-                -- Modern form: two color objects.
-                local c1, c2 = a, b
-                if not (c1 and c2) then return end
-                if nativeGradientAlpha then
-                    return nativeGradientAlpha(self, orientation,
-                        c1.r or 0, c1.g or 0, c1.b or 0, c1.a == nil and 1 or c1.a,
-                        c2.r or 0, c2.g or 0, c2.b or 0, c2.a == nil and 1 or c2.a)
-                elseif nativeGradient then
-                    return nativeGradient(self, orientation,
-                        c1.r or 0, c1.g or 0, c1.b or 0,
-                        c2.r or 0, c2.g or 0, c2.b or 0)
-                end
-                -- No gradient support at all: approximate with the end stop.
-                return self:SetVertexColor(c2.r or 0, c2.g or 0, c2.b or 0,
-                                           c2.a == nil and 1 or c2.a)
-            end
-            -- Legacy numeric form: hand straight through.
-            if nativeGradient then return nativeGradient(self, orientation, a, b, ...) end
-        end
-        markPolyfilled("widget:SetGradient")
-    end
+    -- Texture:SetGradient and CheckButton:GetChecked are NOT patched here.
+    --
+    -- Both used to be wrapped over the native on the shared widget metatable,
+    -- because in both cases WotLK HAS the method but with the wrong shape:
+    --   SetGradient  -- pre-10.0 takes (orientation, r1,g1,b1, r2,g2,b2); the
+    --                   addon calls the 10.0 form (orientation, color, color).
+    --   GetChecked   -- pre-Legion returns 1/nil, not true/false, and nil
+    --                   assigned into the settings table DELETES the key, so
+    --                   unticking any checkbox appeared to do nothing.
+    -- Both problems are real. But a wrapper on the shared metatable means every
+    -- Blizzard widget in the client runs GudaBags Lua on those calls -- Blizzard
+    -- reads :GetChecked() constantly -- and that leaks taint into secure code.
+    --
+    -- They are OUR call-shape problems, so they are fixed at OUR call sites:
+    -- ns.Utils:GetChecked(button) and ns.Utils:SetGradient(texture, ...) in
+    -- Core\Utils.lua. Blizzard's methods stay native.
 
     -- Texture:SetAtlas  (7.0) -- WotLK has no atlas system. Hide rather than
     -- leave a stale texture showing; callers only use it for decorative icons.
     polyfillMethod({ "Texture" }, "SetAtlas", function(self) self:SetTexture(nil) end)
 
-    -- CheckButton:GetChecked -- must be WRAPPED, not existence-checked.
-    -- Pre-Legion it returns 1 or NIL; modern code expects true/false. That
-    -- matters here because Database:SetSetting writes the value straight into
-    -- the settings table, and assigning nil DELETES the key, so the setting
-    -- silently falls back to its default. Net effect: unticking any checkbox in
-    -- the options UI appeared to do nothing at all.
-    do
-        local checkButton = CreateProbe("CheckButton")
-        local mt = getmetatable(checkButton)
-        local index = mt and type(mt.__index) == "table" and mt.__index or nil
-        if index and type(index.GetChecked) == "function" then
-            local nativeGetChecked = index.GetChecked
-            index.GetChecked = function(self)
-                local v = nativeGetChecked(self)
-                return (v and v ~= 0) and true or false
-            end
-            markPolyfilled("widget:GetChecked")
-        end
-        checkButton:Hide()
-    end
-
     -- Slider:SetObeyStepOnDrag (Cataclysm 4.0). Pre-Cata sliders always snap to
     -- SetValueStep while dragging, so requesting that behaviour is a no-op here.
-    -- UI\Controls\Slider.lua calls it unconditionally, and a slider is the third
-    -- control in the General settings tab -- so a nil here aborted the entire
-    -- settings build and left the popup with tabs but no content.
+    --
+    -- Reported only, never written. A no-op written into the shared Slider
+    -- metatable put GudaBags on the call path of every Blizzard slider in the
+    -- client -- for a method that does nothing. UI\Controls\Slider.lua and
+    -- UI\CategoryEditor.lua nil-guard the call instead, which is correct on a
+    -- client where the behaviour is already the default.
     do
         local slider = CreateProbe("Slider")
         local mt = getmetatable(slider)
@@ -1044,55 +1079,12 @@ local widgetPolyfillOK, widgetPolyfillErr = pcall(function()
             report.notes[#report.notes + 1] =
                 "Slider metatable __index is " ..
                 type(mt and mt.__index) .. " -- metatable polyfills unavailable"
-        elseif type(index.SetObeyStepOnDrag) ~= "function" then
-            index.SetObeyStepOnDrag = function() end
-            -- Verify the write actually stuck; some clients protect these tables.
-            if type(slider.SetObeyStepOnDrag) == "function" then
-                markPolyfilled("widget:SetObeyStepOnDrag")
-            else
-                report.notes[#report.notes + 1] =
-                    "metatable write REJECTED for SetObeyStepOnDrag"
-            end
-        else
+        elseif type(index.SetObeyStepOnDrag) == "function" then
             markNative("widget:SetObeyStepOnDrag")
+        else
+            report.missingGlobals["widget:SetObeyStepOnDrag"] = true
         end
         slider:Hide()
-    end
-
-    -- Frame:SetBackdropColor / SetBackdropBorderColor -- CRASH GUARD.
-    --
-    -- Pre-Legion these are raw C calls that dereference the frame's backdrop
-    -- struct with no null check. Calling either on a frame whose backdrop is
-    -- unset (never assigned, or cleared with SetBackdrop(nil)) writes through a
-    -- null pointer and takes the whole client down with
-    -- "ERROR #132 ACCESS_VIOLATION ... at 0x00000000". On retail the same call
-    -- is a harmless no-op, which is why the addon does it freely.
-    --
-    -- Switching themes does exactly this: Core\Theme.lua clears the backdrop
-    -- when moving to the metal theme, and other code then recolours the frame.
-    -- There are ~170 SetBackdropColor call sites across 27 files, so guarding
-    -- each one is impractical and easy to regress -- guard the method instead.
-    do
-        -- Backdrop methods live on several widget metatables, and Button /
-        -- CheckButton / Slider do not necessarily share Frame's. Wrap each
-        -- distinct table once (dedup by identity in case they DO share).
-        local wrapped = {}
-        for _, mt in pairs(metas) do
-            if not wrapped[mt] then
-                wrapped[mt] = true
-                for _, name in ipairs({ "SetBackdropColor", "SetBackdropBorderColor" }) do
-                    local native = rawget(mt, name)
-                    if type(native) == "function" then
-                        mt[name] = function(self, ...)
-                            -- GetBackdrop() is nil when no backdrop is applied.
-                            if self.GetBackdrop and not self:GetBackdrop() then return end
-                            return native(self, ...)
-                        end
-                        markPolyfilled("widget:" .. name .. " (crash guard)")
-                    end
-                end
-            end
-        end
     end
 
     -- Cooldown niceties added in MoP 5.0 -- purely visual, safe to ignore.
@@ -1104,6 +1096,74 @@ local widgetPolyfillOK, widgetPolyfillErr = pcall(function()
 end)
 if not widgetPolyfillOK then
     report.notes[#report.notes + 1] = "widget polyfill failed: " .. tostring(widgetPolyfillErr)
+end
+
+-------------------------------------------------------------------------
+-- 11c-bis. SetBackdropColor / SetBackdropBorderColor CRASH GUARD.
+--
+-- Pre-Legion these are raw C calls that dereference the frame's backdrop
+-- struct with no null check. Calling either on a frame whose backdrop is unset
+-- (never assigned, or cleared with SetBackdrop(nil)) writes through a null
+-- pointer and takes the whole client down with
+-- "ERROR #132 ACCESS_VIOLATION ... at 0x00000000". On retail the same call is a
+-- harmless no-op, which is why the addon does it freely. Core\Theme.lua clears
+-- the backdrop on a theme switch and other code then recolours the frame, so
+-- this is reachable in normal use, and there are ~170 recolour call sites.
+--
+-- This used to wrap the method on every shared widget metatable. That fixed the
+-- crash and created a worse problem: every Blizzard frame in the client then ran
+-- GudaBags Lua on those calls, which taints secure execution.
+--
+-- So the guard is stamped PER INSTANCE, from ns.CreateFrame, on frames we own.
+-- An instance field shadows the metatable method, so Blizzard's frames keep the
+-- native and ours get the null check.
+--
+-- Allocation shape matters here (RULES.md Rule 2): ~750 item buttons are
+-- pre-warmed, so this is two module-level closures plus one weak cache keyed by
+-- metatable -- NOT a closure pair per frame.
+-------------------------------------------------------------------------
+do
+    local nativesByIndex = setmetatable({}, { __mode = "k" })
+
+    local function nativesFor(frame)
+        local mt = getmetatable(frame)
+        local index = mt and type(mt.__index) == "table" and mt.__index or nil
+        if not index then return nil end
+        local entry = nativesByIndex[index]
+        if entry == nil then
+            entry = {
+                color  = index.SetBackdropColor,
+                border = index.SetBackdropBorderColor,
+            }
+            nativesByIndex[index] = entry
+        end
+        return entry
+    end
+
+    local function guardedSetBackdropColor(self, ...)
+        -- GetBackdrop() is nil when no backdrop is applied.
+        if self.GetBackdrop and not self:GetBackdrop() then return end
+        local n = nativesFor(self)
+        if n and n.color then return n.color(self, ...) end
+    end
+
+    local function guardedSetBackdropBorderColor(self, ...)
+        if self.GetBackdrop and not self:GetBackdrop() then return end
+        local n = nativesFor(self)
+        if n and n.border then return n.border(self, ...) end
+    end
+
+    -- Idempotent: safe to call again on a frame that already carries the guard.
+    function ns.GuardBackdrop(frame)
+        if not frame or frame.__gbBackdropGuarded then return end
+        local n = nativesFor(frame)
+        if not n or not (n.color or n.border) then return end
+        frame.__gbBackdropGuarded = true
+        if n.color  then frame.SetBackdropColor       = guardedSetBackdropColor end
+        if n.border then frame.SetBackdropBorderColor = guardedSetBackdropBorderColor end
+    end
+
+    markPolyfilled("backdrop crash guard (per-instance)")
 end
 
 -------------------------------------------------------------------------
@@ -1233,26 +1293,39 @@ do
             -- Legacy order succeeds only on a legacy client.
             local legacyOrder = pcall(nativeSetWidth, 100, probe)
 
-            -- Accept EITHER order from callers (frame is the table argument),
-            -- then forward in whichever order this client actually implements.
-            UIDropDownMenu_SetWidth = function(a, b, padding)
-                local frame, width
-                if type(a) == "table" then frame, width = a, b else width, frame = a, b end
+            -- Published on ns, NOT assigned back over the FrameXML globals.
+            --
+            -- Overwriting the globals put GudaBags on the call path of every
+            -- Blizzard dropdown in the client, for a problem that is purely
+            -- ours: our 7 call sites use the modern order. The addon calls
+            -- ns.DropDownSetWidth / ns.DropDownSetText instead.
+            ns.DropDownSetWidth = function(frame, width, padding)
                 if legacyOrder then return nativeSetWidth(width, frame, padding) end
                 return nativeSetWidth(frame, width, padding)
             end
 
-            UIDropDownMenu_SetText = function(a, b)
-                local frame, text
-                if type(a) == "table" then frame, text = a, b else text, frame = a, b end
+            ns.DropDownSetText = function(frame, text)
                 if legacyOrder then return nativeSetText(text, frame) end
                 return nativeSetText(frame, text)
             end
 
             report.notes[#report.notes + 1] =
                 "UIDropDownMenu order: " .. (legacyOrder and "legacy (width,frame)" or "modern (frame,width)")
-            markPolyfilled("UIDropDownMenu_SetWidth/SetText")
+            markPolyfilled("ns.DropDownSetWidth/SetText")
         end
+    end
+
+    -- The probe can fail (no UIDropDownMenuTemplate, or the natives are absent).
+    -- Call sites must still be callable, so fall back to the modern order --
+    -- which is what this client reports anyway.
+    if not ns.DropDownSetWidth then
+        ns.DropDownSetWidth = function(frame, width, padding)
+            if nativeSetWidth then return nativeSetWidth(frame, width, padding) end
+        end
+        ns.DropDownSetText = function(frame, text)
+            if nativeSetText then return nativeSetText(frame, text) end
+        end
+        report.notes[#report.notes + 1] = "UIDropDownMenu order: probe failed, assuming modern"
     end
 end
 

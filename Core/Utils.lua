@@ -3,6 +3,60 @@ local addonName, ns = ...
 local Utils = {}
 ns:RegisterModule("Utils", Utils)
 
+local CreateFrame = ns.CreateFrame or CreateFrame
+
+-------------------------------------------------
+-- Widget call-shape helpers
+--
+-- 3.3.5a HAS these methods, but with a pre-modern signature. The shim used to
+-- wrap them on the SHARED widget metatables, which put GudaBags on the call
+-- path of every Blizzard widget in the client and leaked taint into secure
+-- code (see the note in Compatibility\Shim335.lua section 11c). They are our
+-- call-shape problems, so they are fixed at our call sites instead.
+-------------------------------------------------
+
+-- Pre-Legion GetChecked returns 1 or nil, modern code expects true/false.
+-- This matters beyond tidiness: Database:SetSetting writes the value straight
+-- into the settings table, and assigning nil DELETES the key -- so unticking
+-- any checkbox silently fell back to its default.
+function Utils:GetChecked(button)
+    if not button or not button.GetChecked then return false end
+    local v = button:GetChecked()
+    return (v and v ~= 0) and true or false
+end
+
+-- Pre-10.0 SetGradient takes (orientation, r1,g1,b1, r2,g2,b2) -- seven loose
+-- numbers, no alpha. The addon calls the 10.0 form (orientation, color, color).
+-- Accept the modern form and route to whatever this client implements.
+function Utils:SetGradient(texture, orientation, a, b, ...)
+    if not texture then return end
+
+    if type(a) == "table" then
+        local c1, c2 = a, b
+        if not (c1 and c2) then return end
+        if texture.SetGradientAlpha then
+            return texture:SetGradientAlpha(orientation,
+                c1.r or 0, c1.g or 0, c1.b or 0, c1.a == nil and 1 or c1.a,
+                c2.r or 0, c2.g or 0, c2.b or 0, c2.a == nil and 1 or c2.a)
+        elseif texture.SetGradient then
+            return texture:SetGradient(orientation,
+                c1.r or 0, c1.g or 0, c1.b or 0,
+                c2.r or 0, c2.g or 0, c2.b or 0)
+        end
+        -- No gradient support at all: approximate with the end stop.
+        return texture:SetVertexColor(c2.r or 0, c2.g or 0, c2.b or 0,
+                                      c2.a == nil and 1 or c2.a)
+    end
+
+    -- Legacy numeric form: hand straight through.
+    if texture.SetGradient then return texture:SetGradient(orientation, a, b, ...) end
+end
+
+-- Note: SetObeyStepOnDrag needs no helper. The shim no longer writes a no-op
+-- into the shared Slider metatable to fake it, and both call sites
+-- (UI\Controls\Slider.lua, UI\CategoryEditor.lua) already nil-guard it -- which
+-- is the correct shape, since pre-Cata sliders snap to SetValueStep anyway.
+
 -------------------------------------------------
 -- Item Key Generation
 -- Creates a unique key for an item based on its properties

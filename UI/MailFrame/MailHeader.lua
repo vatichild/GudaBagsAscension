@@ -12,6 +12,8 @@ local IconButton = ns:GetModule("IconButton")
 local SearchToggleButton = ns:GetModule("SearchToggleButton")
 local Theme = ns:GetModule("Theme")
 
+local CreateFrame = ns.CreateFrame or CreateFrame
+
 local frame = nil
 local onDragStop = nil
 local viewingCharacterData = nil

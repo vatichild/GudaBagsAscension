@@ -8,6 +8,8 @@ local Utils = ns:GetModule("Utils")
 local Database = ns:GetModule("Database")
 local Font = ns:GetModule("Font")
 
+local CreateFrame = ns.CreateFrame or CreateFrame
+
 local moneyFrame = nil
 
 local GOLD_ICON = "|TInterface\\MoneyFrame\\UI-GoldIcon:10|t"
@@ -216,13 +218,16 @@ local function ShowGoldMenu(frame)
             local allChars = Database:GetAllCharacters(false, false)
             for _, char in ipairs(allChars) do
                 local info = UIDropDownMenu_CreateInfo()
-                local classColor = RAID_CLASS_COLORS[char.class]
+                -- ns.ClassColor returns an addon-owned clone that always has the
+                -- ColorMixin methods. Pre-Legion RAID_CLASS_COLORS entries are
+                -- plain {r,g,b,colorStr} tables, and the shim no longer mixes
+                -- methods into Blizzard's table -- writing to a Blizzard global
+                -- taints it for every Blizzard reader.
+                local classColor = ns.ClassColor and ns.ClassColor(char.class)
                 local label = char.name .. " - " .. char.realm
                 if classColor and classColor.WrapTextInColorCode then
                     info.text = classColor:WrapTextInColorCode(label)
                 elseif classColor and classColor.colorStr then
-                    -- Pre-Legion RAID_CLASS_COLORS entries are plain tables with
-                    -- a colorStr field and no ColorMixin methods.
                     info.text = "|c" .. classColor.colorStr .. label .. "|r"
                 else
                     info.text = label

@@ -9,6 +9,8 @@ local Font = ns:GetModule("Font")
 local Tooltip = ns:GetModule("Tooltip")
 local Utils = ns:GetModule("Utils")
 
+local CreateFrame = ns.CreateFrame or CreateFrame
+
 -- Which frame type CreateFrame accepts for our item buttons. The dedicated
 -- "ItemButton" type only exists from Dragonflight (10.0); everywhere else the
 -- template is a plain Button. Resolved once by asking the client directly --
@@ -2189,10 +2191,10 @@ function ItemButton:SetItem(button, itemData, size, isReadOnly)
                     return  -- already showing this exact glow — nothing to rebuild
                 end
                 button._glowR, button._glowG, button._glowB = r, g, b
-                button.innerShadow.top:SetGradient("VERTICAL", CreateColor(r, g, b, 0), CreateColor(r, g, b, 0.5))
-                button.innerShadow.bottom:SetGradient("VERTICAL", CreateColor(r, g, b, 0.5), CreateColor(r, g, b, 0))
-                button.innerShadow.left:SetGradient("HORIZONTAL", CreateColor(r, g, b, 0.5), CreateColor(r, g, b, 0))
-                button.innerShadow.right:SetGradient("HORIZONTAL", CreateColor(r, g, b, 0), CreateColor(r, g, b, 0.5))
+                Utils:SetGradient(button.innerShadow.top, "VERTICAL", CreateColor(r, g, b, 0), CreateColor(r, g, b, 0.5))
+                Utils:SetGradient(button.innerShadow.bottom, "VERTICAL", CreateColor(r, g, b, 0.5), CreateColor(r, g, b, 0))
+                Utils:SetGradient(button.innerShadow.left, "HORIZONTAL", CreateColor(r, g, b, 0.5), CreateColor(r, g, b, 0))
+                Utils:SetGradient(button.innerShadow.right, "HORIZONTAL", CreateColor(r, g, b, 0), CreateColor(r, g, b, 0.5))
                 for _, tex in pairs(button.innerShadow) do tex:Show() end
             end
         end

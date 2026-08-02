@@ -396,6 +396,119 @@ local function describeCall(label, fn, ...)
     report_(pcall(fn, ...))
 end
 
+-- Taint-surface probe.
+--
+-- Answers one question: what does GudaBags still OWN that Blizzard's code also
+-- reads? Anything we own is a place where secure execution enters addon Lua and
+-- picks up our taint -- which is what produced
+-- "AddOn 'GudaBags' tainted the call of the secure function 'IsResponseSeen()'"
+-- when opening the GM ticket UI.
+--
+-- Tier 1 entries below MUST all report `native`. The bag globals are Tier 3:
+-- they report `GudaBags` by design, because replacing them is how the addon
+-- takes over the bags at all.
+local function DumpTaintSurface()
+    line("---- taint surface ----")
+
+    -- Functions we know are ours, by identity -- no debug library needed and no
+    -- guessing. Anything matching one of these is a global we still own.
+    local OURS = {}
+    local function markOurs(fn, label)
+        if type(fn) == "function" then OURS[fn] = label end
+    end
+    markOurs(ns.CreateFrame, "ns.CreateFrame")
+    markOurs(ns.DropDownSetWidth, "ns.DropDownSetWidth")
+    markOurs(ns.DropDownSetText, "ns.DropDownSetText")
+    markOurs(ns.GuardBackdrop, "ns.GuardBackdrop")
+
+    -- Fallback for functions we did not pre-register (the bag globals, the error
+    -- handler): the source chunk name, when the client exposes a debug library.
+    local function ownerOf(fn)
+        if fn == nil then return "nil" end
+        if type(fn) ~= "function" then return type(fn) end
+        if OURS[fn] then return "|cffff5555GudaBags|r (" .. OURS[fn] .. ")" end
+        if type(debug) == "table" and type(debug.getinfo) == "function" then
+            local ok, info = pcall(debug.getinfo, fn, "S")
+            local src = ok and info and info.source and tostring(info.source) or nil
+            if src then
+                if src:find("GudaBags", 1, true) then
+                    return "|cffff5555GudaBags|r " .. (src:match("([^\\/]+)$") or src)
+                end
+                return "native (" .. src .. ")"
+            end
+        end
+        return "function (source unknown)"
+    end
+
+    local function reportGlobal(name)
+        local secure, owner = "?", nil
+        if issecurevariable then
+            local ok, s, o = pcall(issecurevariable, name)
+            if ok then secure, owner = tostring(s), o end
+        end
+        line("  %-36s %s  issecure=%s%s", name, ownerOf(_G[name]),
+            secure, owner and (" taintedBy=" .. tostring(owner)) or "")
+    end
+
+    line("Tier 1 -- these must all read native:")
+    for _, n in ipairs({
+        "CreateFrame",
+        "UIDropDownMenu_SetWidth", "UIDropDownMenu_SetText",
+        "ButtonFrameTemplate_HidePortrait", "ButtonFrameTemplate_HideButtonBar",
+        "securecallfunction",
+    }) do reportGlobal(n) end
+
+    line("Tier 3 -- expected to read GudaBags (this is how the addon works):")
+    for _, n in ipairs({
+        "ToggleBackpack", "ToggleBag", "ToggleAllBags",
+        "OpenAllBags", "OpenBag", "OpenBackpack",
+        "CloseAllBags", "CloseBag", "CloseBackpack",
+    }) do reportGlobal(n) end
+
+    -- Shared widget metatables. A wrapper here reaches every widget in the
+    -- client, Blizzard's included -- the broadest taint surface there is after
+    -- CreateFrame itself.
+    line("shared widget metatables:")
+    local probeParent = _G.GudaBagsShimProbeContainer or UIParent
+    local WIDGETS = { "Frame", "Button", "CheckButton", "Slider", "EditBox", "StatusBar", "ScrollFrame" }
+    local METHODS = { "SetBackdropColor", "SetBackdropBorderColor", "GetChecked",
+                      "SetGradient", "SetObeyStepOnDrag" }
+    for _, wtype in ipairs(WIDGETS) do
+        local ok, obj = pcall(CreateFrame, wtype, nil, probeParent)
+        if ok and obj then
+            local mt = getmetatable(obj)
+            local index = mt and type(mt.__index) == "table" and mt.__index or nil
+            if index then
+                for _, m in ipairs(METHODS) do
+                    if index[m] ~= nil then
+                        line("  %s.%s: %s", wtype, m, ownerOf(index[m]))
+                    end
+                end
+            else
+                line("  %s: no writable __index table", wtype)
+            end
+            obj:Hide()
+        end
+    end
+
+    -- Blizzard-owned tables we must only ever read.
+    line("Blizzard tables:")
+    if issecurevariable and type(RAID_CLASS_COLORS) == "table" then
+        local ok, secure, owner = pcall(issecurevariable, RAID_CLASS_COLORS, "WARRIOR")
+        line("  RAID_CLASS_COLORS.WARRIOR issecure=%s%s",
+            ok and tostring(secure) or "?", owner and (" taintedBy=" .. tostring(owner)) or "")
+    end
+    for _, n in ipairs({ "WHITE_FONT_COLOR", "NORMAL_FONT_COLOR", "GRAY_FONT_COLOR" }) do
+        local t = _G[n]
+        line("  %-20s %s WrapTextInColorCode=%s", n, type(t),
+            type(t) == "table" and type(t.WrapTextInColorCode) or "n/a")
+    end
+
+    line("error handler: %s", ownerOf(geterrorhandler and geterrorhandler() or nil))
+    line("(the error sink is deliberately ours -- /gberrors is the only error")
+    line(" visibility this client gives. It chains to the previous handler.)")
+end
+
 -- Currency API probe.
 --
 -- The whole 3.3.5a currency port is written against the client's own shipped
@@ -988,6 +1101,13 @@ SlashCmdList["GUDABAGSDIAG"] = function(arg)
         -- so the second run must append to keep both halves readable in the file.
         if not guidSnapshot then report = {} end
         pcall(DumpItemGUIDs)
+        GudaBags_Diag = report
+        DEFAULT_CHAT_FRAME:AddMessage(
+            "|cff00ccff[diag]|r saved to GudaBags_Diag -- /reload to write it to disk")
+        return
+    elseif arg == "taint" then
+        report = {}
+        pcall(DumpTaintSurface)
         GudaBags_Diag = report
         DEFAULT_CHAT_FRAME:AddMessage(
             "|cff00ccff[diag]|r saved to GudaBags_Diag -- /reload to write it to disk")

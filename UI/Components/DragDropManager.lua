@@ -5,6 +5,8 @@ ns:RegisterModule("DragDropManager", DragDropManager)
 
 local Constants = ns.Constants
 
+local CreateFrame = ns.CreateFrame or CreateFrame
+
 -------------------------------------------------
 -- State
 -------------------------------------------------

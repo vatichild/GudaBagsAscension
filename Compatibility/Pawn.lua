@@ -16,6 +16,8 @@ ns:RegisterModule("Compatibility.Pawn", Pawn)
 
 local Events = ns:GetModule("Events")
 
+local CreateFrame = ns.CreateFrame or CreateFrame
+
 local upgradeCache = {}   -- [itemLink] = true/false
 local pending = {}        -- [itemLink] = true (awaiting a definitive answer)
 

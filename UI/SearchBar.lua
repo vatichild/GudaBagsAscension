@@ -10,6 +10,8 @@ local Database = ns:GetModule("Database")
 local Font = ns:GetModule("Font")
 
 local instances = {}
+
+local CreateFrame = ns.CreateFrame or CreateFrame
 local searchOverlay = nil
 -- True on clients that cannot support the full-screen click catcher; see
 -- CreateSearchOverlay. Callers must treat searchOverlay as optional.

@@ -7,6 +7,8 @@ local Constants = ns.Constants
 local L = ns.L
 local Utils = ns:GetModule("Utils")
 
+local CreateFrame = ns.CreateFrame or CreateFrame
+
 local frame = nil
 local backButton = nil
 local onBackCallback = nil

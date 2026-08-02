@@ -6,6 +6,8 @@ ns:RegisterModule("MailScanner", MailScanner)
 local Database = ns:GetModule("Database")
 local Events = ns:GetModule("Events")
 
+local CreateFrame = ns.CreateFrame or CreateFrame
+
 -- State
 local isMailboxOpen = false
 local cachedMail = {}

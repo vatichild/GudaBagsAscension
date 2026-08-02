@@ -1,5 +1,7 @@
 local addonName, ns = ...
 
+local CreateFrame = ns.CreateFrame or CreateFrame
+
 -- Soul bags exist in Classic Era and TBC (Warlock class feature)
 -- Check if player is a Warlock
 local _, playerClass = UnitClass("player")

@@ -6,6 +6,8 @@ ns:RegisterModule("GuildBankFrame.GuildBankFooter", GuildBankFooter)
 local Constants = ns.Constants
 local L = ns.L
 
+local CreateFrame = ns.CreateFrame or CreateFrame
+
 local frame = nil
 local mainGuildBankFrame = nil
 

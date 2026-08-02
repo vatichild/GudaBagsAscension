@@ -3,6 +3,8 @@ local addonName, ns = ...
 local DragFlyoutBar = {}
 ns:RegisterModule("DragFlyoutBar", DragFlyoutBar)
 
+local CreateFrame = ns.CreateFrame or CreateFrame
+
 -------------------------------------------------
 -- Layout
 -------------------------------------------------

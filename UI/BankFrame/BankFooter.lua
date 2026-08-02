@@ -5,6 +5,9 @@ ns:RegisterModule("BankFrame.BankFooter", BankFooter)
 
 local Constants = ns.Constants
 local Font = ns:GetModule("Font")
+local Utils = ns:GetModule("Utils")
+
+local CreateFrame = ns.CreateFrame or CreateFrame
 
 local frame = nil
 local backButton = nil
@@ -435,7 +438,7 @@ local function CreateIncludeReagentsCheckbox(parent)
     local INCLUDE_REAGENTS_CVAR = "bankAutoDepositReagents"
 
     checkbox:SetScript("OnClick", function(self)
-        local checked = self:GetChecked()
+        local checked = Utils:GetChecked(self)
         -- Try CVar first
         if SetCVar then
             SetCVar(INCLUDE_REAGENTS_CVAR, checked and "1" or "0")
@@ -463,7 +466,7 @@ local function CreateIncludeReagentsCheckbox(parent)
         end
         -- Fallback to Blizzard's checkbox
         if BankFrame and BankFrame.IncludeReagentsCheckbox then
-            self:SetChecked(BankFrame.IncludeReagentsCheckbox:GetChecked())
+            self:SetChecked(Utils:GetChecked(BankFrame.IncludeReagentsCheckbox))
         else
             -- Default to unchecked (safer default - don't auto-deposit reagents)
             self:SetChecked(false)
@@ -491,10 +494,14 @@ local moneyInputCallback = nil
 local function CreateMoneyInputFrame()
     if moneyInputFrame then return moneyInputFrame end
 
-    local dialogCounter = 1
-    local f = CreateFrame("Frame", "GudaBagsMoneyDialog" .. dialogCounter, UIParent)
+    -- One fixed name, not a counter. The counter that used to be here was a
+    -- local reset to 1 on every call, so it never actually varied -- but it read
+    -- as though each call appended a new entry to Blizzard's UISpecialFrames.
+    -- The early return above already guarantees this body runs exactly once.
+    local DIALOG_NAME = "GudaBagsMoneyDialog1"
+    local f = CreateFrame("Frame", DIALOG_NAME, UIParent)
     f:SetToplevel(true)
-    table.insert(UISpecialFrames, "GudaBagsMoneyDialog" .. dialogCounter)
+    table.insert(UISpecialFrames, DIALOG_NAME)
     f:SetPoint("CENTER")  -- Default, will be repositioned on show
     f:EnableMouse(true)
     f:SetFrameStrata("DIALOG")

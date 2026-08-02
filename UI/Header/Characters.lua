@@ -6,6 +6,8 @@ ns:RegisterModule("Header.Characters", Characters)
 local Database = ns:GetModule("Database")
 local Font = ns:GetModule("Font")
 
+local CreateFrame = ns.CreateFrame or CreateFrame
+
 local frame = nil
 local onCharacterSelected = nil
 

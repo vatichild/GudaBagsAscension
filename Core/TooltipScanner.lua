@@ -3,6 +3,8 @@ local addonName, ns = ...
 local TooltipScanner = {}
 ns:RegisterModule("TooltipScanner", TooltipScanner)
 
+local CreateFrame = ns.CreateFrame or CreateFrame
+
 -------------------------------------------------
 -- Tooltip Management
 -------------------------------------------------

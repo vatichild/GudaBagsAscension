@@ -3,6 +3,8 @@ local addonName, ns = ...
 local BankScanner = {}
 ns:RegisterModule("BankScanner", BankScanner)
 
+local CreateFrame = ns.CreateFrame or CreateFrame
+
 -------------------------------------------------
 -- Retail Delegation Helper
 -- On Retail, some functions delegate to RetailBankScanner

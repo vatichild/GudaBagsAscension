@@ -10,6 +10,8 @@ local ItemScanner = ns:GetModule("ItemScanner")
 
 local cachedBags = {}
 
+local CreateFrame = ns.CreateFrame or CreateFrame
+
 -- Track all itemIDs currently in bags (for detecting truly new items)
 local knownItemIDs = {}  -- { [itemID] = count }
 

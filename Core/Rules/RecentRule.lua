@@ -3,6 +3,8 @@ local addonName, ns = ...
 local RuleEngine = ns:GetModule("RuleEngine")
 local Database = ns:GetModule("Database")
 
+local CreateFrame = ns.CreateFrame or CreateFrame
+
 -------------------------------------------------
 -- Recent Items Tracking
 -------------------------------------------------

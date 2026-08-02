@@ -4,6 +4,8 @@ local CategoryHeaderPool = {}
 ns:RegisterModule("CategoryHeaderPool", CategoryHeaderPool)
 
 local Font = ns:GetModule("Font")
+
+local CreateFrame = ns.CreateFrame or CreateFrame
 local LayoutEngine = nil  -- Lazy loaded to avoid circular dependency
 
 -------------------------------------------------

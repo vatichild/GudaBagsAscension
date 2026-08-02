@@ -3,6 +3,8 @@ local addonName, ns = ...
 local IconButton = {}
 ns:RegisterModule("IconButton", IconButton)
 
+local CreateFrame = ns.CreateFrame or CreateFrame
+
 -- Icon definitions with default sizes
 local ICONS = {
     close = {
