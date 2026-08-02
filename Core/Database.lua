@@ -708,13 +708,27 @@ function Database:GetMoney(fullName)
 end
 
 -------------------------------------------------
--- Currencies (account-wide alt counts; MoP/Retail only)
+-- Currencies (account-wide alt counts)
+--
+-- The key is whatever Compatibility\API.lua:GetCurrencyKey produced: a retail
+-- currencyID on MoP/Retail, a currency ITEM id on Wrath (3.3.5a has no currency
+-- ids), and a negated extraCurrencyType (-1 honor, -2 arena) for the PvP rows,
+-- which carry no item id on any version.
 -------------------------------------------------
 
--- currencies: { [currencyID] = quantity } for the current character
+-- currencies: { [currencyKey] = quantity } for the current character
 function Database:SaveCurrencies(currencies)
     local charData = self:GetCurrentCharacter()
     if not charData then return end
+
+    -- Never trade good data for an empty table. The currency list can read as
+    -- empty simply because the server has not sent it yet, and that is
+    -- indistinguishable from "this character owns nothing" at this level.
+    if (not currencies or not next(currencies))
+        and charData.currencies and next(charData.currencies) then
+        return
+    end
+
     charData.currencies = currencies
 end
 
@@ -732,7 +746,7 @@ function Database:CountCurrencyAcrossCharacters(currencyID)
         -- Numeric SavedVariables keys deserialize as strings after a reload, so
         -- accept either the numeric or the string form of the currencyID.
         local qty = cur and (cur[currencyID] or cur[tostring(currencyID)]) or 0
-        if qty > 0 then
+        if type(qty) == "number" and qty > 0 then
             table.insert(characterCounts, {
                 fullName = fullName,
                 name = charData.name,

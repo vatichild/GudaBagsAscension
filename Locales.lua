@@ -494,6 +494,9 @@ L["TOOLTIP_MAIL_LOWER"] = "Mail"
 L["TOOLTIP_EQUIPPED"] = "Equipped"
 L["TOOLTIP_GUILD_BANK"] = "Guild Bank"
 L["TOOLTIP_CURRENCY_HEADER"] = "Owned by"
+L["CURRENCY_QUANTITY"] = "Quantity:"
+L["CURRENCY_MAXIMUM"] = "Maximum:"
+L["CURRENCY_TOTAL_EARNED"] = "Total Earned:"
 L["TOOLTIP_TOTAL"] = "Total"
 L["TOOLTIP_ACCOUNT_GOLD"] = "Account gold:"
 L["TOOLTIP_REALM_GOLD"] = "Realm gold:"
@@ -999,6 +1002,9 @@ L["CHIP_SPECIAL_LEARNABLE"] = "Apprendre"
 L["CHIP_SPECIAL_MOG"] = "Mog"
 L["TOOLTIP_GUILD_BANK"] = "Banque de guilde"
 L["TOOLTIP_CURRENCY_HEADER"] = "Possédé par"
+L["CURRENCY_QUANTITY"] = "Quantité :"
+L["CURRENCY_MAXIMUM"] = "Maximum :"
+L["CURRENCY_TOTAL_EARNED"] = "Total gagné :"
 
 -- German
 local L = Locales.deDE
@@ -1466,6 +1472,9 @@ L["CHIP_SPECIAL_LEARNABLE"] = "Lernen"
 L["CHIP_SPECIAL_MOG"] = "Mog"
 L["TOOLTIP_GUILD_BANK"] = "Gildenbank"
 L["TOOLTIP_CURRENCY_HEADER"] = "Im Besitz von"
+L["CURRENCY_QUANTITY"] = "Menge:"
+L["CURRENCY_MAXIMUM"] = "Maximum:"
+L["CURRENCY_TOTAL_EARNED"] = "Insgesamt verdient:"
 
 -- Russian
 local L = Locales.ruRU
@@ -1875,6 +1884,9 @@ L["CHIP_SPECIAL_LEARNABLE"] = "Изучить"
 L["CHIP_SPECIAL_MOG"] = "Обл."
 L["TOOLTIP_GUILD_BANK"] = "Банк гильдии"
 L["TOOLTIP_CURRENCY_HEADER"] = "Есть у"
+L["CURRENCY_QUANTITY"] = "Количество:"
+L["CURRENCY_MAXIMUM"] = "Максимум:"
+L["CURRENCY_TOTAL_EARNED"] = "Всего получено:"
 
 -- Brazilian Portuguese
 local L = Locales.ptBR
@@ -2284,6 +2296,9 @@ L["CHIP_SPECIAL_LEARNABLE"] = "Aprender"
 L["CHIP_SPECIAL_MOG"] = "Mog"
 L["TOOLTIP_GUILD_BANK"] = "Banco da Guilda"
 L["TOOLTIP_CURRENCY_HEADER"] = "Possuído por"
+L["CURRENCY_QUANTITY"] = "Quantidade:"
+L["CURRENCY_MAXIMUM"] = "Máximo:"
+L["CURRENCY_TOTAL_EARNED"] = "Total obtido:"
 
 -- Spanish (Spain)
 local L = Locales.esES
@@ -2693,6 +2708,9 @@ L["CHIP_SPECIAL_LEARNABLE"] = "Aprender"
 L["CHIP_SPECIAL_MOG"] = "Mog"
 L["TOOLTIP_GUILD_BANK"] = "Banco de hermandad"
 L["TOOLTIP_CURRENCY_HEADER"] = "En posesión de"
+L["CURRENCY_QUANTITY"] = "Cantidad:"
+L["CURRENCY_MAXIMUM"] = "Máximo:"
+L["CURRENCY_TOTAL_EARNED"] = "Total obtenido:"
 
 -- Spanish (Mexico) - Uses esES translations
 local L = Locales.esMX
@@ -3110,6 +3128,9 @@ L["CHIP_SPECIAL_LEARNABLE"] = "學習"
 L["CHIP_SPECIAL_MOG"] = "塑形"
 L["TOOLTIP_GUILD_BANK"] = "公會銀行"
 L["TOOLTIP_CURRENCY_HEADER"] = "擁有者"
+L["CURRENCY_QUANTITY"] = "數量："
+L["CURRENCY_MAXIMUM"] = "上限："
+L["CURRENCY_TOTAL_EARNED"] = "累計獲得："
 
 -- Simplified Chinese
 local L = Locales.zhCN
@@ -3520,6 +3541,9 @@ L["CHIP_SPECIAL_LEARNABLE"] = "学习"
 L["CHIP_SPECIAL_MOG"] = "幻化"
 L["TOOLTIP_GUILD_BANK"] = "公会银行"
 L["TOOLTIP_CURRENCY_HEADER"] = "拥有者"
+L["CURRENCY_QUANTITY"] = "数量："
+L["CURRENCY_MAXIMUM"] = "上限："
+L["CURRENCY_TOTAL_EARNED"] = "累计获得："
 
 -- Korean
 local L = Locales.koKR
@@ -3866,6 +3890,9 @@ L["CHIP_SPECIAL_LEARNABLE"] = "학습"
 L["CHIP_SPECIAL_MOG"] = "형상"
 L["TOOLTIP_GUILD_BANK"] = "길드 은행"
 L["TOOLTIP_CURRENCY_HEADER"] = "보유 캐릭터"
+L["CURRENCY_QUANTITY"] = "수량:"
+L["CURRENCY_MAXIMUM"] = "최대:"
+L["CURRENCY_TOTAL_EARNED"] = "총 획득량:"
 
 -- Italian
 local L = Locales.itIT
@@ -4212,3 +4239,6 @@ L["CHIP_SPECIAL_LEARNABLE"] = "Imparare"
 L["CHIP_SPECIAL_MOG"] = "Mog"
 L["TOOLTIP_GUILD_BANK"] = "Banca di Gilda"
 L["TOOLTIP_CURRENCY_HEADER"] = "Posseduto da"
+L["CURRENCY_QUANTITY"] = "Quantità:"
+L["CURRENCY_MAXIMUM"] = "Massimo:"
+L["CURRENCY_TOTAL_EARNED"] = "Totale guadagnato:"

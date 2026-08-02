@@ -105,6 +105,7 @@ A full replacement for the guild bank window, with tab navigation, search, and s
 - Hover any item and the tooltip tells you how many you have across the realm, split by bags, bank, mail and equipped
 - Browse another character's bags, bank and mail without logging in
 - The footer shows your gold added up across every character
+- Hover a currency and the tooltip tells you which of your characters are holding it
 
 ---
 
@@ -164,6 +165,7 @@ This build targets interface 30300, so it turns on the things that exist in Wrat
 | Feature | Status |
 |---|---|
 | Keyring | Works |
+| Tracked currencies in the footer | Works |
 | Quiver and ammo bags | Works |
 | Soul bags (Warlock) | Works |
 | Bank bag slots (7) | Works |
@@ -213,6 +215,7 @@ The 3.3.5a client tells you a lot less than Retail does when something goes wron
 | `/gbdiag guid` | Check whether this client's item GUIDs are real per-item identities. Run it, swap two items between occupied slots, run it again. |
 | `/gbdiag markers` | Check every bag button's cached item against the live slot. Run it when a lock, pin or star icon shows up on the wrong item. |
 | `/gbdiag mog` | Print the text and RGB of the "collect this appearance" tooltip line on your gear. Run it when the transmog dot doesn't show up — the line is matched on both its wording and its purple colour. |
+| `/gbdiag currency` | Dump this client's real currency API: what each function returns, how many values, and what the tracked-currency list looks like. Run it if the footer currencies are missing or wrong. |
 | `/gbdiag restack` | Replay the last Restack and Clean: every move attempted, what the client reported back, and which slots were still locked at the end. Run it right after a restack that left an item greyed out. |
 | `/gbdiag unblock` | Turn off the mouse on frames that are eating your clicks |
 | `/gbtrace on\|off\|dump` | Leave breadcrumbs that survive a client crash |

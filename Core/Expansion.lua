@@ -46,8 +46,23 @@ if not Expansion.IsRetail and not Expansion.IsClassicEra and not Expansion.IsTBC
 end
 
 -- Wrath 3.3.5a shares Classic's bag layout (bags 0-4, bank -1/5-11, keyring -2).
--- It has a keyring, quivers/ammo and a guild bank, but NONE of the modern systems
--- (reagent bank, warband bank, C_CurrencyInfo, native C_Container.SortBags).
+-- It has a keyring, quivers/ammo and a guild bank, but none of the modern
+-- namespaces (reagent bank, warband bank, C_CurrencyInfo, native
+-- C_Container.SortBags).
+--
+-- It DOES have the currency system itself, though -- the stock 3.3.5a token
+-- frame, addressed through globals rather than through C_CurrencyInfo. Hence the
+-- capability test below rather than a flat `false`.
+--
+-- Deliberately scoped to IsWrath. Classic Era 1.15 and TBC Anniversary run on the
+-- modern engine, so C_CurrencyInfo.GetCurrencyListSize exists there and a pure
+-- capability test would switch the feature on for two clients this fork cannot
+-- test and that have no currency content behind it. Do not "simplify" the
+-- IsWrath clause away.
+local hasWrathCurrencyAPI = type(GetCurrencyListSize) == "function"
+    and type(GetCurrencyListInfo) == "function"
+    and type(GetBackpackCurrencyInfo) == "function"
+
 Expansion.Features = {
     -- Classic Era / TBC / Wrath features
     HasKeyring = Expansion.IsClassicEra or Expansion.IsTBC or Expansion.IsWrath,
@@ -62,8 +77,18 @@ Expansion.Features = {
     HasNativeBagSort = Expansion.IsRetail,  -- C_Container.SortBags() available
     HasReagentBank = Expansion.IsRetail,
     HasWarbandBank = Expansion.IsRetail,
-    HasCurrency = Expansion.IsRetail or Expansion.IsMoP,
+    HasCurrency = Expansion.IsRetail or Expansion.IsMoP
+        or (Expansion.IsWrath and hasWrathCurrencyAPI),
 }
+
+-- Which shape the currency API speaks, for callers that must branch on it:
+--   "modern" -- C_CurrencyInfo, returns tables, identity is a currencyID
+--   "wotlk"  -- bare globals, returns value tuples, identity is an itemID
+-- nil when the feature is off. C_CurrencyInfo is the shim's empty NoopTable on
+-- Wrath, so the member test (not the table test) is what discriminates.
+Expansion.CurrencyAPI = (C_CurrencyInfo and C_CurrencyInfo.GetCurrencyListInfo) and "modern"
+    or (Expansion.Features.HasCurrency and "wotlk")
+    or nil
 
 -- Convenience exports to namespace root
 ns.IsRetail = Expansion.IsRetail
@@ -72,4 +97,5 @@ ns.IsTBC = Expansion.IsTBC
 ns.IsWrath = Expansion.IsWrath
 ns.IsMoP = Expansion.IsMoP
 ns.ExpansionFeatures = Expansion.Features
+ns.CurrencyAPI = Expansion.CurrencyAPI
 

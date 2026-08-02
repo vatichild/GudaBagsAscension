@@ -522,8 +522,21 @@ local function InitializeHooks()
     end
 
     -- SetCurrencyToken: the Currency tab list (index into the currency list)
+    --
+    -- This used to resolve the id through GetCurrencyListLink, which does not
+    -- exist on 3.3.5a -- the method itself does, so the hook installed and then
+    -- silently did nothing. On that client currencies have no link type at all
+    -- and identity comes out of the info tuple as an itemID.
     if GameTooltip.SetCurrencyToken then
+        local API = ns:GetModule("Compatibility.API")
         hooksecurefunc(GameTooltip, "SetCurrencyToken", function(self, index)
+            if API and API.HasCurrency and API:HasCurrency() then
+                local _, isHeader, _, _, _, extraCurrencyType, _, itemID = API:GetCurrencyListInfo(index)
+                if not isHeader then
+                    AddCurrencySection(self, API:GetCurrencyKey(itemID, extraCurrencyType))
+                end
+                return
+            end
             local getLink = (C_CurrencyInfo and C_CurrencyInfo.GetCurrencyListLink) or GetCurrencyListLink
             if getLink then
                 AddCurrencySection(self, GetCurrencyIDFromLink(getLink(index)))

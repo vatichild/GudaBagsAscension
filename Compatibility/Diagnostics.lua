@@ -364,6 +364,149 @@ local function DumpItemGUIDs()
     guidSnapshot = bySlot
 end
 
+local currencyTokenHooked = false
+
+-- Describe one pcall'd return tuple: arity first, then each value's type and
+-- value. Arity is the finding -- a custom core routinely appends returns, and a
+-- name list read out of a doc file cannot tell you where the tuple really ends.
+local function describeCall(label, fn, ...)
+    if type(fn) ~= "function" then
+        line("  %s: %s (not callable)", label, type(fn))
+        return
+    end
+    -- Read the tuple through a vararg callee rather than packing into a table:
+    -- a trailing nil is a real return here, and `#t` would silently drop it.
+    local function report_(ok, ...)
+        if not ok then
+            line("  %s: RAISED -- %s", label, tostring((...)))
+            return
+        end
+        local n = select("#", ...)
+        if n == 0 then
+            line("  %s: returned nothing", label)
+            return
+        end
+        local parts = {}
+        for i = 1, n do
+            local v = select(i, ...)
+            parts[#parts + 1] = ("[%d]%s=%s"):format(i, type(v), tostring(v))
+        end
+        line("  %s: arity=%d %s", label, n, table.concat(parts, " "))
+    end
+    report_(pcall(fn, ...))
+end
+
+-- Currency API probe.
+--
+-- The whole 3.3.5a currency port is written against the client's own shipped
+-- APIDocumentation addon -- a DOC FILE, not the binary. docs\ASCENSION-API.md
+-- spells out why that is not enough on its own: a markNative check answers "does
+-- this exist", not "does this work", and the first attempt at the SOUNDKIT bug
+-- failed precisely because a 3.3.5a signature was assumed instead of read.
+--
+-- So this prints the real arity and the real value types, not the documented
+-- names. Run it, /reload, and read GudaBags_Diag out of SavedVariables.
+local function DumpCurrencyAPI()
+    line("---- currency API probe ----")
+
+    local names = {
+        "GetCurrencyListSize", "GetCurrencyListInfo", "GetCurrencyListLink",
+        "GetBackpackCurrencyInfo", "SetCurrencyBackpack", "SetCurrencyUnused",
+        "ExpandCurrencyList", "SetCurrencyShow", "GetCurrencyInfo",
+        "GetHonorCurrency", "GetMaxArenaCurrency", "GetNumWatchedTokens",
+    }
+    line("globals:")
+    for _, n in ipairs(names) do
+        line("  %s: %s", n, type(_G[n]))
+    end
+
+    line("MAX_WATCHED_TOKENS: %s (%s)",
+        tostring(_G.MAX_WATCHED_TOKENS), type(_G.MAX_WATCHED_TOKENS))
+
+    local ciCount = -1
+    if type(C_CurrencyInfo) == "table" then
+        ciCount = 0
+        for _ in pairs(C_CurrencyInfo) do ciCount = ciCount + 1 end
+    end
+    line("C_CurrencyInfo members: %d (0 means the Shim335 NoopTable guard still holds)", ciCount)
+
+    -- The currency list. Arity of GetCurrencyListInfo is the headline finding.
+    local size = 0
+    if type(GetCurrencyListSize) == "function" then
+        local ok, n = pcall(GetCurrencyListSize)
+        size = (ok and n) or 0
+    end
+    line("GetCurrencyListSize() = %d", size)
+
+    local firstItemID
+    for i = 1, math.min(size, 25) do
+        describeCall(("GetCurrencyListInfo(%d)"):format(i), _G.GetCurrencyListInfo, i)
+        if not firstItemID and type(GetCurrencyListInfo) == "function" then
+            local ok, _, isHeader = pcall(GetCurrencyListInfo, i)
+            if ok and not isHeader then
+                local ok2, r = pcall(function() return select(9, GetCurrencyListInfo(i)) end)
+                if ok2 and type(r) == "number" and r > 0 then firstItemID = r end
+            end
+        end
+        if type(GetCurrencyListLink) == "function" then
+            describeCall(("GetCurrencyListLink(%d)"):format(i), _G.GetCurrencyListLink, i)
+        end
+    end
+    if size > 25 then line("  (list truncated at 25 of %d rows)", size) end
+
+    -- Does an out-of-range backpack index return nil, or raise? That decides
+    -- whether Currency:Update can loop past the watched count or must clamp.
+    local probeMax = (type(_G.MAX_WATCHED_TOKENS) == "number" and _G.MAX_WATCHED_TOKENS + 2) or 5
+    line("backpack (tracked) currencies, probing 1..%d:", probeMax)
+    for i = 1, probeMax do
+        describeCall(("GetBackpackCurrencyInfo(%d)"):format(i), _G.GetBackpackCurrencyInfo, i)
+    end
+
+    describeCall("GetHonorCurrency()", _G.GetHonorCurrency)
+    describeCall("GetMaxArenaCurrency()", _G.GetMaxArenaCurrency)
+
+    -- Ascension's own namespace. Unverified; a possible enhancement, never a
+    -- dependency -- the stock list API above is the documented path.
+    if type(C_Token) == "table" then
+        local members = {}
+        for k, v in pairs(C_Token) do members[#members + 1] = ("%s(%s)"):format(k, type(v)) end
+        table.sort(members)
+        line("C_Token members: %s", table.concat(members, " "))
+        describeCall("C_Token.GetTokenTypes()", C_Token.GetTokenTypes)
+        if firstItemID then
+            describeCall(("C_Token.GetTokenInfo(%d)"):format(firstItemID), C_Token.GetTokenInfo, firstItemID)
+            describeCall(("C_Token.GetTokenAmount(%d)"):format(firstItemID), C_Token.GetTokenAmount, firstItemID)
+        end
+    else
+        line("C_Token: %s", type(C_Token))
+    end
+
+    -- Proves the SetHyperlink tooltip route: WotLK currencies are real items.
+    if firstItemID then
+        local nm, lnk = GetItemInfo(firstItemID)
+        line("GetItemInfo(%d) -> name=%s link=%s", firstItemID, tostring(nm), tostring(lnk))
+    else
+        line("no non-header row with an itemID found -- SetHyperlink route unproven")
+    end
+
+    line("GameTooltip.SetCurrencyToken: %s", type(GameTooltip.SetCurrencyToken))
+    line("GameTooltip.SetCurrencyByID: %s", type(GameTooltip.SetCurrencyByID))
+
+    -- Settles the one thing a static dump cannot: whether SetCurrencyToken's
+    -- argument indexes the FULL currency list or only the watched subset. The
+    -- Tooltip.lua hook is keyed off that answer.
+    if not currencyTokenHooked and type(GameTooltip.SetCurrencyToken) == "function" then
+        currencyTokenHooked = true
+        hooksecurefunc(GameTooltip, "SetCurrencyToken", function(_, index)
+            local ok, nm = pcall(GetCurrencyListInfo, index)
+            line("SetCurrencyToken(%s) -> GetCurrencyListInfo name=%s",
+                tostring(index), ok and tostring(nm) or "<error>")
+            GudaBags_Diag = report
+        end)
+        line("hooked SetCurrencyToken -- now hover a row in the Currency tab, then /reload")
+    end
+end
+
 --- Dump every active item button's cached identity against the live slot.
 ---
 --- The failure this exists to catch: a button whose cached bagID/slot points at a
@@ -845,6 +988,13 @@ SlashCmdList["GUDABAGSDIAG"] = function(arg)
         -- so the second run must append to keep both halves readable in the file.
         if not guidSnapshot then report = {} end
         pcall(DumpItemGUIDs)
+        GudaBags_Diag = report
+        DEFAULT_CHAT_FRAME:AddMessage(
+            "|cff00ccff[diag]|r saved to GudaBags_Diag -- /reload to write it to disk")
+        return
+    elseif arg == "currency" then
+        report = {}
+        pcall(DumpCurrencyAPI)
         GudaBags_Diag = report
         DEFAULT_CHAT_FRAME:AddMessage(
             "|cff00ccff[diag]|r saved to GudaBags_Diag -- /reload to write it to disk")
