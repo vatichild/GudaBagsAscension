@@ -900,7 +900,11 @@ local function CreateButton(parent)
     -- Cooldown frame
     local cooldown = CreateFrame("Cooldown", name .. "Cooldown", button, "CooldownFrameTemplate")
     cooldown:SetAllPoints()
-    cooldown:SetDrawEdge(false)
+    -- Nil-guarded, not polyfilled: the shim no longer writes no-ops for these
+    -- onto the shared Cooldown metatable, which every action and stance button
+    -- in the client inherits (Compatibility\Shim335.lua section 11c). Both are
+    -- cosmetic on WotLK, so absent is the same as false here.
+    if cooldown.SetDrawEdge then cooldown:SetDrawEdge(false) end
     cooldown:SetFrameLevel(button:GetFrameLevel() + Constants.FRAME_LEVELS.COOLDOWN)
     if cooldown.SetHideCountdownNumbers then
         cooldown:SetHideCountdownNumbers(false)
@@ -1924,14 +1928,13 @@ local function EnsureDropTargetGlow(button)
 
     local animGroup = glow:CreateAnimationGroup()
     local fadeOut = animGroup:CreateAnimation("Alpha")
-    fadeOut:SetFromAlpha(1)
-    fadeOut:SetToAlpha(0.2)
+    -- Utils, not the shared Alpha metatable — see Core\Utils.lua.
+    Utils:SetAnimAlphaRange(fadeOut, 1, 0.2)
     fadeOut:SetDuration(0.6)
     fadeOut:SetOrder(1)
     fadeOut:SetSmoothing("IN_OUT")
     local fadeIn = animGroup:CreateAnimation("Alpha")
-    fadeIn:SetFromAlpha(0.2)
-    fadeIn:SetToAlpha(1)
+    Utils:SetAnimAlphaRange(fadeIn, 0.2, 1)
     fadeIn:SetDuration(0.6)
     fadeIn:SetOrder(2)
     fadeIn:SetSmoothing("IN_OUT")

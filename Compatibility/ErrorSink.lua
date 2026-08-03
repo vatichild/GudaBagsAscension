@@ -11,6 +11,28 @@
 -- expensive here (debugstack, chat output, table churn) then freezes the client
 -- outright -- which is exactly what an earlier version of this file did. Every
 -- guard below exists to make a per-frame error storm cheap and self-limiting.
+--
+-- OPT-IN, OFF BY DEFAULT (GudaBags_ErrorSink.enabled -- own saved variable, not
+-- a Database setting, so this file stays self-contained). seterrorhandler()
+-- makes GudaBags the owner of the GLOBAL error handler: every Lua error anywhere
+-- in the client, other addons' included, then runs our code inside whatever
+-- execution raised it and taints the rest of that execution. That is how a bag
+-- addon ends up named in
+--   "An action was blocked because of taint from GudaBags - CastSpellByName()"
+-- for a /castsequence macro it never touched. Worth it while hunting a bug,
+-- not worth it every session.
+--
+-- What "off" still catches: Capture() is called DIRECTLY by Core\Events.lua
+-- (every pcall'd event handler) and by the C_Timer shim, so GudaBags' own
+-- failures are still logged with the sink off. What is lost is the rest of the
+-- client -- other addons and FrameXML -- which is exactly the part that was
+-- making us the taint owner for errors that were never ours.
+--
+-- Known gap of the deferred install: SavedVariables are restored AFTER an
+-- addon's files execute (see `entries` below), so the flag cannot be read until
+-- ADDON_LOADED -- by which point GudaBags' own files have already run. Errors
+-- raised during file load are therefore no longer captured even when enabled.
+-- They still print to chat through whatever handler is installed.
 -- =====================================================================
 
 local addonName, ns = ...
@@ -73,12 +95,17 @@ end
 
 -- Publish this session's table over whatever the client restored. Same table
 -- reference from here on, so later captures land straight in the saved variable.
+--
+-- This is also the earliest point at which GudaBags_ErrorSink.enabled is
+-- readable, so it is where the global error handler gets installed (or not).
 do
     local loader = CreateFrame("Frame")
     loader:RegisterEvent("ADDON_LOADED")
     loader:SetScript("OnEvent", function(self, _, loaded)
         if loaded == addonName then
             GudaBags_Errors = entries
+            if type(GudaBags_ErrorSink) ~= "table" then GudaBags_ErrorSink = {} end
+            if GudaBags_ErrorSink.enabled then ErrorSink:Install() end
             self:UnregisterEvent("ADDON_LOADED")
         end
     end)
@@ -113,55 +140,88 @@ end
 
 -- Chain onto whatever handler is already installed (BugSack, Blizzard's, ...)
 -- so we observe errors without swallowing them outright.
-do
+--
+-- Called from ADDON_LOADED only when the user has opted in, so `previous` is
+-- read at INSTALL time rather than at file scope -- by then every other addon
+-- has had its chance to install one, and we chain onto the real current handler
+-- instead of onto whoever happened to be there when the shim loaded.
+local installed = false
+function ErrorSink:Install()
+    if installed or not seterrorhandler then return end
+    installed = true
+
     local previous = geterrorhandler and geterrorhandler() or nil
-    if seterrorhandler then
-        seterrorhandler(function(msg)
-            if disabled then
-                if previous then return previous(msg) end
-                return
+    seterrorhandler(function(msg)
+        if disabled then
+            if previous then return previous(msg) end
+            return
+        end
+
+        events = events + 1
+        if events > MAX_EVENTS then
+            -- An unfixable error storm. Stop doing any work at all rather
+            -- than dragging the client down with us.
+            disabled = true
+            if DEFAULT_CHAT_FRAME then
+                DEFAULT_CHAT_FRAME:AddMessage(
+                    "|cffff5555GudaBags error sink disabled|r after " ..
+                    MAX_EVENTS .. " errors. Run |cffffff00/guda errors|r to see them.")
             end
+            return
+        end
 
-            events = events + 1
-            if events > MAX_EVENTS then
-                -- An unfixable error storm. Stop doing any work at all rather
-                -- than dragging the client down with us.
-                disabled = true
-                if DEFAULT_CHAT_FRAME then
-                    DEFAULT_CHAT_FRAME:AddMessage(
-                        "|cffff5555GudaBags error sink disabled|r after " ..
-                        MAX_EVENTS .. " errors. Run |cffffff00/gberrors|r to see them.")
-                end
-                return
-            end
+        local text = tostring(msg or "?")
+        if #text > MAX_MSG_LEN then text = text:sub(1, MAX_MSG_LEN) .. "..." end
 
-            local text = tostring(msg or "?")
-            if #text > MAX_MSG_LEN then text = text:sub(1, MAX_MSG_LEN) .. "..." end
+        -- debugstack is expensive: only walk the stack for a message we
+        -- have never seen. Repeats skip it entirely.
+        --
+        -- Skipped for taint/blocked messages too: the client raises those
+        -- with no usable Lua stack (the recorded ERROR_HANDLER_DATABASE
+        -- entry has an empty `stack` field), so walking it costs time inside
+        -- a handler that now runs for every error in the client and returns
+        -- nothing worth reading.
+        local stack
+        if not seen[text] and debugstack and not isAlwaysForwarded(text) then
+            stack = debugstack(2, 12, 12)
+        end
 
-            -- debugstack is expensive: only walk the stack for a message we
-            -- have never seen. Repeats skip it entirely.
-            --
-            -- Skipped for taint/blocked messages too: the client raises those
-            -- with no usable Lua stack (the recorded ERROR_HANDLER_DATABASE
-            -- entry has an empty `stack` field), so walking it costs time inside
-            -- a handler that now runs for every error in the client and returns
-            -- nothing worth reading.
-            local stack
-            if not seen[text] and debugstack and not isAlwaysForwarded(text) then
-                stack = debugstack(2, 12, 12)
-            end
+        local forward = shouldForward(text)
+        pcall(ErrorSink.Capture, ErrorSink, msg, "errorhandler", stack)
 
-            local forward = shouldForward(text)
-            pcall(ErrorSink.Capture, ErrorSink, msg, "errorhandler", stack)
+        -- Suppress runaway re-printing; the saved variable still counts them.
+        if previous and forward then return previous(msg) end
+    end)
 
-            -- Suppress runaway re-printing; the saved variable still counts them.
-            if previous and forward then return previous(msg) end
-        end)
+    if DEFAULT_CHAT_FRAME then
+        DEFAULT_CHAT_FRAME:AddMessage(
+            "|cff00ccffGudaBags|r error sink |cff33ff33installed|r " ..
+            "(|cffffff00/guda errors off|r to stop owning the global error handler).")
     end
 end
 
-SLASH_GUDABAGSERRORS1 = "/gberrors"
-SlashCmdList["GUDABAGSERRORS"] = function(arg)
+--- /guda errors [on|off|clear]
+--- No SlashCmdList key of its own -- see the header of Compatibility\Diagnostics.lua
+--- for why every key we drop is one less way for a macro to be blocked in our name.
+function ErrorSink:Dump(arg)
+    if arg == "on" or arg == "off" then
+        local on = (arg == "on")
+        if type(GudaBags_ErrorSink) ~= "table" then GudaBags_ErrorSink = {} end
+        GudaBags_ErrorSink.enabled = on
+        if on and not installed then
+            -- Install now so this session is already covered; the saved flag
+            -- keeps it on across reloads.
+            self:Install()
+        elseif not on and installed then
+            DEFAULT_CHAT_FRAME:AddMessage(
+                "|cff00ccffGudaBags|r error sink |cffff5555off|r after |cffffff00/reload|r " ..
+                "(the handler cannot be uninstalled mid-session).")
+        else
+            DEFAULT_CHAT_FRAME:AddMessage("|cff00ccffGudaBags|r error sink " ..
+                (on and "|cff33ff33on|r" or "|cffff5555off|r") .. ".")
+        end
+        return
+    end
     if arg == "clear" then
         -- Wipe in place: GudaBags_Errors and `entries` must stay the same table.
         for i = #entries, 1, -1 do entries[i] = nil end
@@ -170,7 +230,12 @@ SlashCmdList["GUDABAGSERRORS"] = function(arg)
         return
     end
     if count == 0 then
-        DEFAULT_CHAT_FRAME:AddMessage("|cff00ccffGudaBags|r no errors captured. |cff33ff33Clean.|r")
+        if not installed then
+            DEFAULT_CHAT_FRAME:AddMessage("|cff00ccffGudaBags|r error sink is |cffff5555off|r " ..
+                "-- nothing is being captured. |cffffff00/guda errors on|r then |cffffff00/reload|r.")
+        else
+            DEFAULT_CHAT_FRAME:AddMessage("|cff00ccffGudaBags|r no errors captured. |cff33ff33Clean.|r")
+        end
         return
     end
     DEFAULT_CHAT_FRAME:AddMessage(("|cff00ccffGudaBags|r %d distinct error(s), %d total%s:")

@@ -208,18 +208,20 @@ Items in a set are marked, and each set can show up as its own category.
 
 The 3.3.5a client tells you a lot less than Retail does when something goes wrong, so this fork adds a few commands to fill the gap.
 
+They all live under the single `/guda` command on purpose. On 3.3.5a the chat parser resolves a slash command by walking every entry in `SlashCmdList`, and macros run through that same parser — so each extra command an addon registers is another chance for a macro to be blocked with *"An action was blocked because of taint from GudaBags"*. One key instead of four.
+
 | Command | What it does |
 |---|---|
-| `/gberrors` | Show Lua errors that were caught. `/gberrors clear` empties the list. |
-| `/gbdiag` | Dump what the compatibility shim did, plus frame and mouse diagnostics |
-| `/gbdiag guid` | Check whether this client's item GUIDs are real per-item identities. Run it, swap two items between occupied slots, run it again. |
-| `/gbdiag markers` | Check every bag button's cached item against the live slot. Run it when a lock, pin or star icon shows up on the wrong item. |
-| `/gbdiag mog` | Print the text and RGB of the "collect this appearance" tooltip line on your gear. Run it when the transmog dot doesn't show up — the line is matched on both its wording and its purple colour. |
-| `/gbdiag currency` | Dump this client's real currency API: what each function returns, how many values, and what the tracked-currency list looks like. Run it if the footer currencies are missing or wrong. |
-| `/gbdiag taint` | List every shared global and widget method GudaBags still owns. Run it if you see "GudaBags has been blocked from an action only available to the Blizzard UI" or a "tainted the call of" error. |
-| `/gbdiag restack` | Replay the last Restack and Clean: every move attempted, what the client reported back, and which slots were still locked at the end. Run it right after a restack that left an item greyed out. |
-| `/gbdiag unblock` | Turn off the mouse on frames that are eating your clicks |
-| `/gbtrace on\|off\|dump` | Leave breadcrumbs that survive a client crash |
+| `/guda errors` | Show Lua errors that were caught. `/guda errors on` starts capturing (then `/reload`), `/guda errors off` stops, `/guda errors clear` empties the list. Off by default: capturing means GudaBags owns the client's global error handler, which gets it blamed for other addons' taint. |
+| `/guda diag` | Dump what the compatibility shim did, plus frame and mouse diagnostics |
+| `/guda diag guid` | Check whether this client's item GUIDs are real per-item identities. Run it, swap two items between occupied slots, run it again. |
+| `/guda diag markers` | Check every bag button's cached item against the live slot. Run it when a lock, pin or star icon shows up on the wrong item. |
+| `/guda diag mog` | Print the text and RGB of the "collect this appearance" tooltip line on your gear. Run it when the transmog dot doesn't show up — the line is matched on both its wording and its purple colour. |
+| `/guda diag currency` | Dump this client's real currency API: what each function returns, how many values, and what the tracked-currency list looks like. Run it if the footer currencies are missing or wrong. |
+| `/guda diag taint` | List every shared global and widget method GudaBags still owns. Run it if you see "GudaBags has been blocked from an action only available to the Blizzard UI" or a "tainted the call of" error. |
+| `/guda diag restack` | Replay the last Restack and Clean: every move attempted, what the client reported back, and which slots were still locked at the end. Run it right after a restack that left an item greyed out. |
+| `/guda diag unblock` | Turn off the mouse on frames that are eating your clicks |
+| `/guda trace on\|off\|dump` | Leave breadcrumbs that survive a client crash |
 
 ### If an item is stuck grey and you can't click it
 
@@ -247,4 +249,4 @@ English, French, German, Russian, Portuguese, Spanish (Spain and Mexico), Chines
 
 Open an issue on [GitHub](https://github.com/vatichild/GudaBagsAscension/issues).
 
-It helps to say which client build you're on, whether your bags were in category, single or split view, and to paste the output of `/gberrors`. This client swallows most Lua errors, so that output is often the only clue there is.
+It helps to say which client build you're on, whether your bags were in category, single or split view, and to paste the output of `/guda errors`. This client swallows most Lua errors, so that output is often the only clue there is — run `/guda errors on` and `/reload` first, reproduce the bug, then `/guda errors`.

@@ -117,7 +117,7 @@ end
 -- other is a status, so only one of them tells you to click.
 --
 -- If the dot stops appearing, this list and the purple threshold are the two
--- things to check -- /gbdiag mog prints both verdicts per line.
+-- things to check -- /guda diag mog prints both verdicts per line.
 local COLLECT_APPEARANCE_WORDS = { "click", "collect", "appearance" }
 
 local function MatchesCollectWords(lowerText)

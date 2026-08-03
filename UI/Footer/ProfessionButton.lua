@@ -38,10 +38,18 @@ local function BuildButton(instance)
     button:EnableMouse(true)
     button:RegisterForClicks("AnyDown")
 
-    -- Secure attrs — set ONCE, never again
-    button:SetAttribute("type", "macro")
+    -- Secure attrs — set ONCE, never again.
+    --
+    -- type="spell", NOT type="macro"+macrotext="/cast X". A macrotext click is
+    -- executed by running the text through the shared chat parser
+    -- (ChatEdit_SendText → ChatEdit_ParseText → SlashCmdList dispatch) — the
+    -- exact machinery that produces
+    --   "An action was blocked because of taint from GudaBags - CastSpellByName()"
+    -- for action-bar macros. type="spell" casts straight from the secure
+    -- handler and never enters it. Same spell, same cursor-cast behaviour.
+    button:SetAttribute("type", "spell")
     local spellName = C_Spell.GetSpellName(cfg.spellID)
-    button:SetAttribute("macrotext", "/cast " .. (spellName or cfg.defaultName))
+    button:SetAttribute("spell", spellName or cfg.defaultName)
 
     button:SetBackdrop({
         bgFile = "Interface\\Buttons\\WHITE8x8",

@@ -218,7 +218,9 @@ local function CreateItemButton(parent, name, isMain)
     -- Cooldown frame
     local cooldown = CreateFrame("Cooldown", nil, button, "CooldownFrameTemplate")
     cooldown:SetAllPoints(icon)
-    cooldown:SetDrawEdge(false)
+    -- Nil-guarded: not polyfilled onto the shared Cooldown metatable any more
+    -- (Compatibility\Shim335.lua section 11c). Cosmetic on WotLK.
+    if cooldown.SetDrawEdge then cooldown:SetDrawEdge(false) end
     button.cooldown = cooldown
 
     -- Highlight

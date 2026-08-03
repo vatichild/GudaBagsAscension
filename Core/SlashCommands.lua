@@ -287,10 +287,60 @@ commandHandlers["help"] = function()
 end
 
 -------------------------------------------------
+-- Developer subcommands (formerly /gbdiag, /gbtrace, /gberrors)
+-------------------------------------------------
+-- These live under /guda instead of owning three more SlashCmdList keys.
+--
+-- 3.3.5a's ChatEdit_ParseText resolves a slash command by walking
+-- pairs(SlashCmdList) and reading _G["SLASH_"..key..i] until one matches. A
+-- MACRO runs through that same parser, so every key GudaBags owns is another
+-- chance for the macro's execution to read an addon-tainted value before it
+-- reaches the command it wanted. When the command it wanted is a protected one
+-- the client blocks it and names us:
+--   "An action was blocked because of taint from GudaBags - CastSpellByName()"
+-- Four keys down to one is a 4x cut in how often that lands on us.
+--
+-- Resolved lazily through ns: Compatibility\Diagnostics.lua loads LAST in the
+-- TOC, long after this file, so the modules do not exist yet at load time.
+
+local function Diag(arg)
+    if not ns.Diagnostics then
+        ns:Print("Diagnostics module not loaded.")
+        return
+    end
+    ns.Diagnostics:Dispatch(arg)
+end
+
+local function Trace(arg)
+    if not ns.Diagnostics then
+        ns:Print("Diagnostics module not loaded.")
+        return
+    end
+    ns.Diagnostics:Trace(arg)
+end
+
+local function Errors(arg)
+    if not ns.ErrorSink then
+        ns:Print("ErrorSink module not loaded.")
+        return
+    end
+    ns.ErrorSink:Dump(arg)
+end
+
+commandHandlers["diag"]   = function() Diag(nil) end
+commandHandlers["trace"]  = function() Trace(nil) end
+commandHandlers["errors"] = function() Errors(nil) end
+
+-------------------------------------------------
 -- Pattern-based Command Handlers
 -------------------------------------------------
 
 local patternHandlers = {}
+
+-- Developer subcommands with an argument: /guda diag taint, /guda trace off, ...
+patternHandlers["^diag%s+(%S+)$"]   = function(arg) Diag(arg:lower()) end
+patternHandlers["^trace%s+(%S+)$"]  = function(arg) Trace(arg:lower()) end
+patternHandlers["^errors%s+(%S+)$"] = function(arg) Errors(arg:lower()) end
 
 -- Count item by ID across characters
 patternHandlers["^count%s+(%d+)$"] = function(itemID)
@@ -365,6 +415,9 @@ end
 -- Registration
 -------------------------------------------------
 
+-- ONE SlashCmdList key for the whole addon. Aliases are free -- the parser only
+-- walks the key list -- but every extra KEY is another chance for a macro to be
+-- blocked in our name (see the developer-subcommand block above).
 function SlashCommands:Register()
     _G["SLASH_GUDABAGS1"] = "/guda"
     _G["SLASH_GUDABAGS2"] = "/gb"

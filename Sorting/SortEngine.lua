@@ -125,7 +125,7 @@ end
 -- piece of evidence is gone. This records what was actually attempted and what
 -- the client reported back, so a bug report can be read instead of guessed at.
 --
--- Only ever active during a restack, capped, and dumped by `/gbdiag restack`.
+-- Only ever active during a restack, capped, and dumped by `/guda diag restack`.
 -------------------------------------------------
 local RESTACK_LOG_MAX = 500
 local restackLog = {}
@@ -1908,7 +1908,7 @@ local RESTACK_TIMEOUT = 30
 
 -- Contents-changed gate.
 --
--- isLocked is NOT a "the move landed" signal on this client. A /gbdiag restack
+-- isLocked is NOT a "the move landed" signal on this client. A /guda diag restack
 -- log caught it exactly: a move from 1:6 into 0:9 reported ok, and 0.16s later
 -- every pending slot read UNLOCKED while the target slot still held its old
 -- stack -- only the destination had updated. Re-planning from that half-applied

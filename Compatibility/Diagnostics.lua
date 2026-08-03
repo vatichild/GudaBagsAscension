@@ -1,14 +1,28 @@
 -- GudaBags Diagnostics (3.3.5a port aid)
 -- =====================================================================
--- /gbdiag  -- inspect what the settings popup ACTUALLY built.
+-- /guda diag  -- inspect what the settings popup ACTUALLY built.
 --
 -- "The frame is empty" has many possible causes: content never created, created
 -- but zero-sized, created but hidden, or created off-screen. Guessing between
 -- them from a screenshot wastes a client run each time, so measure instead.
 -- Results go to chat AND to the GudaBags_Diag saved variable.
+--
+-- NO SlashCmdList KEY OF ITS OWN. This file used to own /gbdiag and /gbtrace.
+-- 3.3.5a's ChatEdit_ParseText dispatches a slash command by walking
+-- pairs(SlashCmdList) and reading _G["SLASH_"..key..i] until one matches, so
+-- every key an addon owns is a chance for a MACRO's execution to read an
+-- addon-tainted value before it reaches the command it was actually looking
+-- for. When that command is a protected one (/cast, /castsequence) the client
+-- blocks it and names us:
+--   "An action was blocked because of taint from GudaBags - CastSpellByName()"
+-- Both entry points now hang off ns and are reached through the single /guda
+-- key in Core\SlashCommands.lua. See ns.Diagnostics below.
 -- =====================================================================
 
 local addonName, ns = ...
+
+local Diagnostics = {}
+ns.Diagnostics = Diagnostics
 
 local report = {}
 
@@ -21,7 +35,7 @@ local report = {}
 -- the client executed as a script. Pushing a marker through RunScript therefore
 -- leaves a breadcrumb readable in Errors\*.txt after the fact.
 --
--- Enable with /gbtrace on. Off by default -- it is a debugging aid, not
+-- Enable with /guda trace on. Off by default -- it is a debugging aid, not
 -- something to leave running.
 local traceEnabled = false
 local traceRing, traceIndex, TRACE_MAX = {}, 0, 60
@@ -44,8 +58,8 @@ function ns.Trace(fmt, ...)
     end
 end
 
-SLASH_GUDABAGSTRACE1 = "/gbtrace"
-SlashCmdList["GUDABAGSTRACE"] = function(arg)
+--- /guda trace [on|off|dump]
+function Diagnostics:Trace(arg)
     if arg == "off" then
         traceEnabled = false
         DEFAULT_CHAT_FRAME:AddMessage("|cff00ccffGudaBags|r trace |cffff5555off|r.")
@@ -62,7 +76,7 @@ SlashCmdList["GUDABAGSTRACE"] = function(arg)
         traceEnabled = true
         DEFAULT_CHAT_FRAME:AddMessage(
             "|cff00ccffGudaBags|r trace |cff33ff33on|r. Markers also land in the crash dump " ..
-            "as 'Last FrameScript_Execute'. |cffffff00/gbtrace off|r to stop.")
+            "as 'Last FrameScript_Execute'. |cffffff00/guda trace off|r to stop.")
     end
 end
 
@@ -223,8 +237,8 @@ end
 --- slot -- otherwise it is just a dressed-up slot key and buys nothing over the
 --- current itemID scope.
 ---
---- Usage: /gbdiag guid, then SWAP two different items between two occupied slots,
---- then /gbdiag guid again. A swap is decisive in both directions -- if the guids
+--- Usage: /guda diag guid, then SWAP two different items between two occupied slots,
+--- then /guda diag guid again. A swap is decisive in both directions -- if the guids
 --- stay put it is slot-derived, if they follow their items it is a real identity.
 --- Moving into an empty slot can only ever prove PASS, never FAIL, because the
 --- vacated slot drops out of the scan entirely.
@@ -300,7 +314,7 @@ local function DumpItemGUIDs()
 
     if not guidSnapshot then
         line("Baseline captured (%d slots). Now SWAP two different items between two", scanned)
-        line("occupied slots (drag A onto B), then run /gbdiag guid again.")
+        line("occupied slots (drag A onto B), then run /guda diag guid again.")
         line("A swap is decisive both ways; moving into an EMPTY slot can only prove PASS.")
         guidSnapshot = bySlot
         return
@@ -349,7 +363,7 @@ local function DumpItemGUIDs()
 
     if itemChangedSlots == 0 and followedItem == 0 then
         line("VERDICT: NO CHANGE DETECTED -- nothing moved between the two runs.")
-        line("Swap two different items between two occupied slots, then run /gbdiag guid again.")
+        line("Swap two different items between two occupied slots, then run /guda diag guid again.")
     elseif slotDerived > 0 then
         line("VERDICT: FAIL -- a slot kept its guid while its item changed.")
         line("The guid addresses the SLOT, not the item. Per-instance locking not viable.")
@@ -471,8 +485,13 @@ local function DumpTaintSurface()
     line("shared widget metatables:")
     local probeParent = _G.GudaBagsShimProbeContainer or UIParent
     local WIDGETS = { "Frame", "Button", "CheckButton", "Slider", "EditBox", "StatusBar", "ScrollFrame" }
+    -- Every method the shim has ever put on a shared metatable. All of these
+    -- must read native or be absent; a GudaBags owner on any of them means
+    -- Blizzard's own widgets run our Lua and inherit our taint.
     local METHODS = { "SetBackdropColor", "SetBackdropBorderColor", "GetChecked",
-                      "SetGradient", "SetObeyStepOnDrag" }
+                      "SetGradient", "SetObeyStepOnDrag", "SetEnabled",
+                      "SetDrawEdge", "SetHideCountdownNumbers", "SetDrawSwipe",
+                      "SetSize", "SetShown" }
     for _, wtype in ipairs(WIDGETS) do
         local ok, obj = pcall(CreateFrame, wtype, nil, probeParent)
         if ok and obj then
@@ -504,9 +523,43 @@ local function DumpTaintSurface()
             type(t) == "table" and type(t.WrapTextInColorCode) or "n/a")
     end
 
+    -- Slash surface. Every key we own in SlashCmdList is one more chance for a
+    -- MACRO to pick up our taint: 3.3.5a's ChatEdit_ParseText dispatches by
+    -- walking pairs(SlashCmdList) and reading _G["SLASH_"..key..i], so a key
+    -- visited before CASTSEQUENCE taints that execution and the following
+    -- CastSpellByName is blocked in our name. Target: exactly one -- GUDABAGS.
+    line("slash surface (want exactly 1 GudaBags key):")
+    local ours = 0
+    if type(SlashCmdList) == "table" then
+        for key, fn in pairs(SlashCmdList) do
+            -- Key prefix, not just ownerOf: this client may ship no debug
+            -- library, and without debug.getinfo ownerOf cannot name the source
+            -- of a plain closure -- which would report zero of our own keys.
+            local owner = ownerOf(fn)
+            if key:upper():find("GUDABAGS", 1, true) or owner:find("GudaBags", 1, true) then
+                ours = ours + 1
+                local secure = "?"
+                if issecurevariable then
+                    local ok, s = pcall(issecurevariable, SlashCmdList, key)
+                    if ok then secure = tostring(s) end
+                end
+                local aliases, i = {}, 1
+                while _G["SLASH_" .. key .. i] do
+                    aliases[i] = _G["SLASH_" .. key .. i]
+                    i = i + 1
+                end
+                line("  SlashCmdList.%-16s %s  issecure=%s  aliases=%s",
+                    key, owner, secure, table.concat(aliases, " "))
+            end
+        end
+    end
+    line("  total GudaBags keys: %d%s", ours,
+        ours > 1 and " |cffff5555(each one is a macro-taint chance)|r" or "")
+
     line("error handler: %s", ownerOf(geterrorhandler and geterrorhandler() or nil))
-    line("(the error sink is deliberately ours -- /gberrors is the only error")
-    line(" visibility this client gives. It chains to the previous handler.)")
+    line("(the error sink is OPT-IN: off by default, /guda errors on + /reload to")
+    line(" install it. Owning the global handler means every error in the client,")
+    line(" including other addons', runs our code and taints that execution.)")
 end
 
 -- Currency API probe.
@@ -815,11 +868,11 @@ local function DumpMarkerState()
 end
 
 -- Bump on every change to this file. Editing a Lua file does not affect the
--- running session, so a /gbdiag issued before the next /reload silently reports
+-- running session, so a /guda diag issued before the next /reload silently reports
 -- from the OLD code -- which has already cost a round trip. Stamping the build
 -- into the report makes stale output obvious at a glance instead of something to
 -- reconstruct from file timestamps.
-local DIAG_BUILD = "2026-08-01-c (marker state dump: /gbdiag markers)"
+local DIAG_BUILD = "2026-08-01-c (marker state dump: /guda diag markers)"
 
 local function RunDiagnostics()
     report = {}   -- the ONE place a full run clears accumulated output
@@ -856,7 +909,7 @@ end
 --- A shown, mouse-enabled frame covering a large part of the screen blocks
 --- targeting, the camera and the action bars, and produces NO error while doing
 --- it -- so it is invisible to every other diagnostic here.
--- Frames we have already hooked, so repeat /gbdiag runs do not stack hooks.
+-- Frames we have already hooked, so repeat /guda diag runs do not stack hooks.
 local watched = {}
 
 --- Hook Show() on large, mouse-enabled, non-GudaBags frames so we learn WHO
@@ -887,7 +940,7 @@ function WatchBlockers()
             end)
         end
     end
-    line("watching %d frame(s) for Show(). Open your bags, then run /gbdiag again.", hooked)
+    line("watching %d frame(s) for Show(). Open your bags, then run /guda diag again.", hooked)
 end
 
 --- Report any watched frame that has since been shown, with the capturing stack.
@@ -1060,8 +1113,8 @@ local function UnblockMouse()
     end
 end
 
-SLASH_GUDABAGSDIAG1 = "/gbdiag"
-SlashCmdList["GUDABAGSDIAG"] = function(arg)
+--- /guda diag [mouse|children|restack|mog|markers|guid|taint|currency|unblock]
+function Diagnostics:Dispatch(arg)
     if arg == "mouse" then
         report = {}
         DEFAULT_CHAT_FRAME:AddMessage("|cff00ccffGudaBags|r scanning for mouse blockers...")

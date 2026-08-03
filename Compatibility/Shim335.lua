@@ -91,7 +91,7 @@ local function CreateProbe(frameType, template)
     if not ok or not frame then return nil end
     if frame.Hide then frame:Hide() end
     if frame.EnableMouse then frame:EnableMouse(false) end
-    -- Without this the frame reports tagged=false in /gbdiag, identical to a
+    -- Without this the frame reports tagged=false in /guda diag, identical to a
     -- foreign frame -- which cost several rounds of misattribution.
     frame._gbCreatedBy = "Shim335 probe (" .. tostring(template or frameType) .. ")"
     return frame
@@ -131,7 +131,7 @@ do
                     -- A timer callback failing 10x a second was therefore
                     -- completely silent in game, and callbacks that set up
                     -- state before failing left that state stranded. Route it
-                    -- to ErrorSink (deduped and rate-capped there) so /gberrors
+                    -- to ErrorSink (deduped and rate-capped there) so /guda errors
                     -- sees it; keep the note for failures raised before
                     -- ErrorSink has loaded.
                     if ns and ns.ErrorSink then
@@ -928,14 +928,29 @@ end
 -------------------------------------------------------------------------
 -- 11c. Widget-method polyfills
 --      ~310 call sites across the UI use region methods added in 5.0-10.0.
---      Adding a MISSING method to a shared metatable is safe: a client that
---      never had the method has no code that calls it, so only we ever reach it.
 --
---      WRAPPING an existing method is not, and nothing in this section does it
---      any more. A wrapper on a shared metatable runs GudaBags Lua for every
---      Blizzard widget in the client, which taints secure execution -- see
---      Core\Utils.lua for GetChecked/SetGradient and section 11c-bis for the
---      backdrop crash guard, both of which moved out of here for that reason.
+--      WRAPPING an existing method on a shared metatable is never done here:
+--      it runs GudaBags Lua for every Blizzard widget in the client and taints
+--      secure execution -- see Core\Utils.lua for GetChecked/SetGradient and
+--      section 11c-bis for the backdrop crash guard, both of which moved out of
+--      here for that reason.
+--
+--      ADDING a missing method used to be considered safe, on the argument that
+--      a client which never had the method has no code that calls it. THAT
+--      ARGUMENT IS WRONG ON ASCENSION, whose FrameXML is partly a retail port:
+--      a ported Blizzard file can call a method this client's widgets lack, and
+--      once we supply it, Blizzard's execution runs our Lua and inherits our
+--      taint. SetEnabled, SetFromAlpha/SetToAlpha and the Cooldown no-ops were
+--      removed for that reason -- they had 3, 4 and 4 call sites between them,
+--      now handled in Core\Utils.lua and by nil-guards at the call sites.
+--
+--      What remains: SetSize, SetShown, SetColorTexture, SetAtlas. These are
+--      NATIVE on this client (see GudaBagsShim_DB.native), so nothing is
+--      written to a shared metatable here at all today. They stay polyfilled
+--      for clients that lack them because the ~310 call sites behind them are
+--      spread across the RULES.md critical files. If a future client reports
+--      any of them as `polyfilled` in /guda diag taint, convert the call sites
+--      rather than leaving the write in place.
 -------------------------------------------------------------------------
 -- Wrapped in pcall: this section reaches into widget metatables, and a failure
 -- here must not abort the rest of the shim (which would leave the addon running
@@ -983,54 +998,30 @@ local widgetPolyfillOK, widgetPolyfillErr = pcall(function()
         elseif native then markNative("widget:" .. name) end
     end
 
-    -- Animation:SetFromAlpha / SetToAlpha  (Cata 4.0)
+    -- Animation:SetFromAlpha / SetToAlpha (Cata 4.0) are NOT polyfilled --
+    -- see Core\Utils.lua Utils:SetAnimAlphaRange, which does the same
+    -- from/to -> SetChange(delta) conversion at our four call sites.
     --
-    -- WotLK has animations, but an Alpha animation is expressed as a single
-    -- SetChange(delta) applied to the region's CURRENT alpha -- there is no
-    -- absolute from/to. Remember whichever endpoint was set and convert as soon
-    -- as both are known, so the retail two-call form keeps working.
-    --
-    -- The Alpha metatable is not reachable from a frame: it needs an actual
-    -- animation, which needs an animation group. Guarded like every other probe
-    -- here, since a client without animations must cost only this polyfill.
-    do
-        local okAnim, anim = pcall(function()
-            return probeFrame:CreateAnimationGroup():CreateAnimation("Alpha")
-        end)
-        if okAnim and anim then
-            local mt = getmetatable(anim)
-            if mt and type(mt.__index) == "table" then
-                metas.Alpha = mt.__index
+    -- The Alpha metatable is shared with every animation in the client, and
+    -- probing it cost an animation group and an animation created at login to
+    -- reach a metatable we then wrote to. Both the write and the probe are gone.
 
-                local function applyChange(self)
-                    -- Only once both ends are known; a lone SetFromAlpha says
-                    -- nothing about the delta.
-                    if self.__gbFromAlpha and self.__gbToAlpha and self.SetChange then
-                        self:SetChange(self.__gbToAlpha - self.__gbFromAlpha)
-                    end
-                end
-                polyfillMethod({ "Alpha" }, "SetFromAlpha", function(self, v)
-                    self.__gbFromAlpha = v
-                    applyChange(self)
-                end)
-                polyfillMethod({ "Alpha" }, "SetToAlpha", function(self, v)
-                    self.__gbToAlpha = v
-                    applyChange(self)
-                end)
-            end
-        end
-    end
-
-    -- Region:SetSize / SetShown / SetEnabled  (Cata 4.0 / MoP 5.0)
+    -- Region:SetSize / SetShown  (Cata 4.0)
     polyfillMethod({ "Frame", "Button", "Texture", "FontString", "Cooldown" }, "SetSize",
         function(self, w, h) self:SetWidth(w); self:SetHeight(h) end)
     polyfillMethod({ "Frame", "Button", "Texture", "FontString", "Cooldown" }, "SetShown",
         function(self, shown) if shown then self:Show() else self:Hide() end end)
-    polyfillMethod({ "Frame", "Button" }, "SetEnabled",
-        function(self, enabled)
-            if enabled then if self.Enable then self:Enable() end
-            else if self.Disable then self:Disable() end end
-        end)
+
+    -- SetEnabled is NOT polyfilled -- see Core\Utils.lua Utils:SetEnabled.
+    --
+    -- The premise at the top of this section ("only we ever reach a method the
+    -- client never had") does not hold on Ascension, whose FrameXML is part
+    -- retail port. A ported Blizzard file that calls button:SetEnabled() finds
+    -- OUR function on the shared Button metatable and runs addon Lua inside
+    -- Blizzard's execution -- which taints it, and gets GudaBags named in
+    --   "AddOn 'GudaBags' tainted the call of the secure function '...'"
+    -- for UI it has nothing to do with. Three call sites did not justify
+    -- sitting on the metatable every Button in the client inherits.
 
     -- Texture:SetColorTexture  (Legion 7.0) -- a solid fill on WotLK is a white
     -- 8x8 texture tinted with SetVertexColor.
@@ -1087,10 +1078,15 @@ local widgetPolyfillOK, widgetPolyfillErr = pcall(function()
         slider:Hide()
     end
 
-    -- Cooldown niceties added in MoP 5.0 -- purely visual, safe to ignore.
-    polyfillMethod({ "Cooldown" }, "SetDrawEdge", function() end)
-    polyfillMethod({ "Cooldown" }, "SetHideCountdownNumbers", function() end)
-    polyfillMethod({ "Cooldown" }, "SetDrawSwipe", function() end)
+    -- Cooldown niceties added in MoP 5.0 are NOT polyfilled either.
+    --
+    -- Same reason as SetEnabled above, and the Cooldown metatable is the worst
+    -- one to sit on: every action button, stance button and aura in the client
+    -- owns a Cooldown, and OmniCC-class addons call these methods on Blizzard's
+    -- cooldowns constantly. A no-op that costs nothing still runs GudaBags Lua
+    -- inside someone else's execution and puts our name on the resulting taint.
+    -- The four call sites (UI\ItemButton.lua, UI\QuestBar.lua, UI\TrackedBar.lua)
+    -- nil-guard these instead -- they are cosmetic on WotLK anyway.
 
     probeFrame:Hide()
 end)

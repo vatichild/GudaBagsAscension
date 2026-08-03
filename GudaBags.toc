@@ -3,7 +3,7 @@
 ## Notes: Clean, unified bag management for all WoW versions
 ## Author: Vati
 ## Version: 2.0.4-wrath
-## SavedVariables: GudaBags_DB, GudaBagsShim_DB, GudaBags_Errors, GudaBags_Diag
+## SavedVariables: GudaBags_DB, GudaBagsShim_DB, GudaBags_Errors, GudaBags_Diag, GudaBags_ErrorSink
 ## SavedVariablesPerCharacter: GudaBags_CharDB
 ## IconTexture: Interface\AddOns\GudaBags\Assets\bags.tga
 ## OptionalDeps: Masque
@@ -15,7 +15,9 @@
 # onto WotLK globals so the rest of the addon runs unmodified.
 Compatibility\Shim335.lua
 
-# Error capture -- loads right after the shim so it sees every later file's errors.
+# Error capture (/guda errors). Opt-in: installs the global error handler only
+# when GudaBags_ErrorSink.enabled is set, because owning that handler makes every
+# error in the client -- other addons' included -- taint its execution as ours.
 Compatibility\ErrorSink.lua
 
 # Localization (load first)
@@ -156,5 +158,5 @@ UI\TrackedBar.lua
 # Quest Item Bar
 UI\QuestBar.lua
 
-# Port diagnostics (/gbdiag). Loads LAST so every module it inspects exists.
+# Port diagnostics (/guda diag). Loads LAST so every module it inspects exists.
 Compatibility\Diagnostics.lua

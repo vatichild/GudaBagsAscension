@@ -57,6 +57,38 @@ end
 -- (UI\Controls\Slider.lua, UI\CategoryEditor.lua) already nil-guard it -- which
 -- is the correct shape, since pre-Cata sliders snap to SetValueStep anyway.
 
+-- SetEnabled (MoP 5.0) expressed with the Enable/Disable pair WotLK does have.
+--
+-- Used to be polyfilled onto the shared Frame and Button metatables. That is a
+-- worse deal than it looks on a client whose FrameXML is part retail port: a
+-- ported Blizzard file calling button:SetEnabled() would find OUR function and
+-- run addon Lua inside Blizzard's own execution, tainting it. Every widget on
+-- the stance bar, the world map and the action bars is a Button.
+function Utils:SetEnabled(widget, enabled)
+    if not widget then return end
+    if widget.SetEnabled then return widget:SetEnabled(enabled) end   -- native
+    if enabled then
+        if widget.Enable then widget:Enable() end
+    else
+        if widget.Disable then widget:Disable() end
+    end
+end
+
+-- Alpha animations: retail sets absolute endpoints (SetFromAlpha/SetToAlpha),
+-- WotLK expresses the same thing as a single SetChange(delta) applied to the
+-- region's current alpha. Same reasoning as above -- the Alpha metatable is
+-- shared with every animation in the client, so the conversion lives here
+-- rather than on it.
+function Utils:SetAnimAlphaRange(anim, from, to)
+    if not anim then return end
+    if anim.SetFromAlpha and anim.SetToAlpha then                     -- native
+        anim:SetFromAlpha(from)
+        anim:SetToAlpha(to)
+        return
+    end
+    if anim.SetChange then anim:SetChange(to - from) end
+end
+
 -------------------------------------------------
 -- Item Key Generation
 -- Creates a unique key for an item based on its properties
@@ -91,7 +123,7 @@ end
 
 -- Stock 3.3.5a has no item GUIDs; Ascension's custom layer adds
 -- GetContainerItemGUID (docs/ASCENSION-API.md section 4). Verified on this client
--- with `/gbdiag guid`: the value is unique per stack and follows the item across
+-- with `/guda diag guid`: the value is unique per stack and follows the item across
 -- slot moves, which makes it a valid identity key for per-item locking.
 --
 -- Resolved once at load. On a client without it every caller gets nil, which

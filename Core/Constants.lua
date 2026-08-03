@@ -560,7 +560,7 @@ Constants.COLOR_THRESHOLDS = {
     -- the test that matters is "blue and red both clearly beat green", which is
     -- what makes a colour read as purple/violet at all. Tight thresholds here
     -- would silently blank the transmog dot if the server ever nudges the shade
-    -- -- run /gbdiag mog to see the real values this client sends.
+    -- -- run /guda diag mog to see the real values this client sends.
     PURPLE = { min_r = 0.30, max_g = 0.55, min_b = 0.55 },
 }
 

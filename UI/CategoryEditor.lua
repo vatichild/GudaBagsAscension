@@ -897,7 +897,7 @@ function CategoryEditor:Open(categoryId)
         or (categoryDef.name or categoryId)
     if frame.SetTitle then frame:SetTitle(string.format(ns.L["EDIT_CATEGORY_NAME"], displayName)) end
     frame.nameBox:SetText(displayName)
-    if frame.nameBox.SetEnabled then frame.nameBox:SetEnabled(not categoryDef.isBuiltIn) end
+    Utils:SetEnabled(frame.nameBox, not categoryDef.isBuiltIn)
     -- Display localized group name
     local localizedGroup = ns.DefaultCategories:GetLocalizedGroupName(currentGroup)
     frame.groupBox:SetText(localizedGroup)
@@ -920,7 +920,7 @@ function CategoryEditor:Open(categoryId)
 
     -- Equipment set categories: hide rules section, disable name, show mark + description
     if categoryDef.isEquipSet then
-        if frame.nameBox.SetEnabled then frame.nameBox:SetEnabled(false) end
+        Utils:SetEnabled(frame.nameBox, false)
         frame.nameBox:SetTextColor(0.5, 0.5, 0.5)
         frame.markLabel:Show()
         for _, btn in ipairs(frame.markButtons) do btn:Show() end
@@ -1087,7 +1087,7 @@ function CategoryEditor:CreateNew()
     -- Update UI for new category
     if frame.SetTitle then frame:SetTitle(ns.L["CREATE_NEW_CATEGORY"]) end
     frame.nameBox:SetText("")
-    if frame.nameBox.SetEnabled then frame.nameBox:SetEnabled(true) end
+    Utils:SetEnabled(frame.nameBox, true)
     frame.nameBox:SetTextColor(1, 1, 1)
     frame.groupBox:SetText("")
     frame.builtInText:Hide()
