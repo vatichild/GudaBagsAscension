@@ -213,7 +213,8 @@ They all live under the single `/guda` command on purpose. On 3.3.5a the chat pa
 | Command | What it does |
 |---|---|
 | `/guda errors` | Show Lua errors that were caught. `/guda errors on` starts capturing (then `/reload`), `/guda errors off` stops, `/guda errors clear` empties the list. Off by default: capturing means GudaBags owns the client's global error handler, which gets it blamed for other addons' taint. |
-| `/guda diag` | Dump what the compatibility shim did, plus frame and mouse diagnostics |
+| `/guda diag` | Frame and mouse diagnostics |
+| `/guda diag shim` | What the 3.3.5a compatibility layer did on this client: which APIs were native, which were added, and which were deliberately left alone. The shim is silent at login unless something is actually missing. |
 | `/guda diag guid` | Check whether this client's item GUIDs are real per-item identities. Run it, swap two items between occupied slots, run it again. |
 | `/guda diag markers` | Check every bag button's cached item against the live slot. Run it when a lock, pin or star icon shows up on the wrong item. |
 | `/guda diag mog` | Print the text and RGB of the "collect this appearance" tooltip line on your gear. Run it when the transmog dot doesn't show up — the line is matched on both its wording and its purple colour. |

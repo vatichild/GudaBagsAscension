@@ -358,13 +358,24 @@ function CategoryManager:CategorizeItem(itemData, bagID, slotID, isOtherChar)
         categoryResultCacheVersion = cachedCategoryVersion
     end
 
+    -- Item data hasn't round-tripped from the server yet: ItemScanner:ScanSlot
+    -- substitutes a Miscellaneous classID, an empty name and itemLevel 0 when
+    -- GetItemInfo misses, and the tooltip-backed rules (isBoE, restoreTag,
+    -- isJunk) read an empty tooltip. Every rule then evaluates against garbage,
+    -- so the verdict is usually a false "Miscellaneous". Answer with it for this
+    -- pass, but don't memoize it — otherwise a freshly looted item stays in the
+    -- wrong category long after its data arrives. Same guard the charges cache
+    -- uses ("tooltip not ready; don't poison cache", TooltipScanner.lua).
+    local dataLoaded = itemData and itemData.name and itemData.name ~= ""
+    local canCache = cacheKey and dataLoaded
+
     local sortedCats = self:GetCategoriesByPriority()
 
     for _, entry in ipairs(sortedCats) do
         if not entry.def.isFallback then
             if self:EvaluateCategoryRules(entry.def, itemData, bagID, slotID, isOtherChar) then
                 -- Cache the result
-                if cacheKey then
+                if canCache then
                     categoryResultCache[cacheKey] = entry.id
                 end
                 return entry.id
@@ -373,7 +384,7 @@ function CategoryManager:CategorizeItem(itemData, bagID, slotID, isOtherChar)
     end
 
     -- Cache fallback result
-    if cacheKey then
+    if canCache then
         categoryResultCache[cacheKey] = "Miscellaneous"
     end
     return "Miscellaneous"

@@ -1113,9 +1113,53 @@ local function UnblockMouse()
     end
 end
 
---- /guda diag [mouse|children|restack|mog|markers|guid|taint|currency|unblock]
+-- The shim's own report. It no longer announces itself at login (a count only
+-- the porter cares about), so this is where you read it.
+local function DumpShimReport()
+    local db = GudaBagsShim_DB
+    if type(db) ~= "table" then line("GudaBagsShim_DB missing -- shim did not finish"); return end
+
+    local function dumpBucket(label, t, withReason)
+        if type(t) ~= "table" then return end
+        local keys = {}
+        for k in pairs(t) do keys[#keys + 1] = k end
+        if #keys == 0 then return end
+        table.sort(keys)
+        line("%s (%d):", label, #keys)
+        for _, k in ipairs(keys) do
+            local why = withReason and type(t[k]) == "string" and t[k] or nil
+            line("  %s%s", k, why and ("  -- " .. why) or "")
+        end
+    end
+
+    line("---- shim report ----")
+    if type(db.build) == "table" then
+        line("client %s build %s (%s), toc %s", tostring(db.build.version),
+            tostring(db.build.build), tostring(db.build.date), tostring(db.build.tocversion))
+    end
+    line("recorded %s", tostring(db.time))
+    dumpBucket("native", db.native)
+    dumpBucket("polyfilled", db.polyfilled)
+    -- The important one: absent ON PURPOSE, nearly always because writing it
+    -- would put us on a shared metatable and leak taint into Blizzard's code.
+    dumpBucket("by design (not polyfilled)", db.byDesign, true)
+    dumpBucket("MISSING (needed, not found)", db.missingGlobals)
+    if type(db.notes) == "table" and #db.notes > 0 then
+        line("notes (%d):", #db.notes)
+        for i = 1, #db.notes do line("  %s", tostring(db.notes[i])) end
+    end
+end
+
+--- /guda diag [shim|mouse|children|restack|mog|markers|guid|taint|currency|unblock]
 function Diagnostics:Dispatch(arg)
-    if arg == "mouse" then
+    if arg == "shim" then
+        report = {}
+        pcall(DumpShimReport)
+        GudaBags_Diag = report
+        DEFAULT_CHAT_FRAME:AddMessage(
+            "|cff00ccff[diag]|r saved to GudaBags_Diag -- /reload to write it to disk")
+        return
+    elseif arg == "mouse" then
         report = {}
         DEFAULT_CHAT_FRAME:AddMessage("|cff00ccffGudaBags|r scanning for mouse blockers...")
         pcall(DumpMouseBlockers)

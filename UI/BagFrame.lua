@@ -109,6 +109,37 @@ local pseudoItemButtons = {} -- Track Empty/Soul/DropTarget pseudo-item buttons 
 local isDraggingItem = false
 local dragCheckTicker = nil
 
+-- Category view: coalesced structural refresh.
+--
+-- When IncrementalUpdate decides the layout must be rebuilt (new item types,
+-- category changes, Empty/Soul/Quiver visibility flips) it paints ghost slots
+-- immediately and defers the rebuild. The deferral exists so a burst of
+-- BAG_UPDATEs collapses into one rebuild — not to delay the item appearing, so
+-- keep it to a frame or two.
+--
+-- The pending flag is what actually does the coalescing: without it every
+-- qualifying update queued its own independent timer, so a loot burst (or the
+-- 0.2s lock self-heal watcher re-entering via ReconcileSlot) stacked N full
+-- refreshes. Refresh() invalidates a queued rebuild so one that already
+-- happened isn't chased by a redundant one.
+--
+-- That invalidation is generation-based rather than handle-based, because this
+-- is a 3.3.5 client: Compatibility/Shim335 polyfills C_Timer, but its `fill`
+-- helper keeps whatever member the client already has, and Ascension's C_Timer
+-- is a partial backport — so a native NewTimer could hand back a handle with no
+-- :Cancel(). Bumping a counter works regardless; the timer may still fire, but
+-- it returns immediately instead of forcing a second rebuild. C_Timer.After is
+-- the one member guaranteed present either way.
+local CATEGORY_REFRESH_DELAY = 0.05
+local categoryRefreshPending = false
+local categoryRefreshGeneration = 0
+
+local function CancelCategoryRefresh()
+    if not categoryRefreshPending then return end
+    categoryRefreshPending = false
+    categoryRefreshGeneration = categoryRefreshGeneration + 1
+end
+
 -- Single authoritative teardown for an item drag.
 --
 -- isDraggingItem drives BOTH the flyout bar and (via BuildCategorySections'
@@ -226,6 +257,28 @@ local UpdateFrameAppearance
 local SaveFramePosition
 local RestoreFramePosition
 local RegisterCombatEndCallback
+
+-- Queue the category view's structural rebuild, coalescing repeat requests.
+-- See CATEGORY_REFRESH_DELAY above for why this is short and why coalescing matters.
+local function ScheduleCategoryRefresh()
+    if categoryRefreshPending then return end
+    categoryRefreshPending = true
+    local generation = categoryRefreshGeneration
+    C_Timer.After(CATEGORY_REFRESH_DELAY, function()
+        -- Superseded by a Refresh that already happened (see CancelCategoryRefresh).
+        if generation ~= categoryRefreshGeneration then return end
+        categoryRefreshPending = false
+        if not frame or not frame:IsShown() then return end
+        if viewingCharacter then return end
+        -- Refresh rebuilds secure item buttons; never touch them mid-combat.
+        -- PLAYER_REGEN_ENABLED refreshes open bags once combat ends (Rule 3).
+        if InCombatLockdown() then
+            RegisterCombatEndCallback()
+            return
+        end
+        BagFrame:Refresh()
+    end)
+end
 
 -- Transient search bar visibility (header toggle). Resets on Hide().
 -- Installs IsSearchBarVisible / ToggleSearchBar / ResetSearchToggle methods on BagFrame.
@@ -560,6 +613,9 @@ function BagFrame:Refresh()
     HealStaleDragState()
 
     ns:ProfileStart("Refresh")
+
+    -- A rebuild is happening now, so a queued one is redundant.
+    CancelCategoryRefresh()
 
     local viewType = Database:GetSetting("bagViewType") or "single"
 
@@ -1716,9 +1772,36 @@ function BagFrame:IncrementalUpdate(dirtyBags)
                 end
             end
 
-            -- If more new item types than ghost slots available, need full refresh
-            if #newItemsNeedingButtons > #ghostSlots then
-                ns:Debug("CategoryView REFRESH: need", #newItemsNeedingButtons, "new buttons, only", #ghostSlots, "ghosts available")
+            -- Newly filled slots that have no button of their own. The itemKey
+            -- loop above misses these whenever the key already exists elsewhere
+            -- — splitting a stack is the common case, since GetItemKey is
+            -- link:quality:isBound and does NOT include the count, so both
+            -- halves share a key. The incremental passes below only ever touch
+            -- slots already in buttonsBySlot, so a slot with no button would
+            -- never be drawn at all; it has to go through a full refresh.
+            local newSlotsNeedingButtons = 0
+            for slotKey in pairs(currentItemsBySlot) do
+                if not buttonsBySlot[slotKey] then
+                    newSlotsNeedingButtons = newSlotsNeedingButtons + 1
+                end
+            end
+
+            -- If more new buttons are needed than ghost slots available, need
+            -- full refresh. Counted per-slot, since that's what a button maps to
+            -- on every path that reaches here: OnBagsUpdated sends net adds to a
+            -- full Refresh while grouping is active, so incremental only runs
+            -- ungrouped (grouping off, or suppressed by an interaction window,
+            -- where LayoutEngine also renders one button per slot). In the one
+            -- mixed case — a batch that both removes and adds while grouping is
+            -- on — this over-counts, which only forces a full refresh that
+            -- renders correctly anyway.
+            local buttonsNeeded = #newItemsNeedingButtons
+            if newSlotsNeedingButtons > buttonsNeeded then
+                buttonsNeeded = newSlotsNeedingButtons
+            end
+            if buttonsNeeded > #ghostSlots then
+                ns:Debug("CategoryView REFRESH: need", buttonsNeeded, "new buttons (keys:", #newItemsNeedingButtons,
+                    "slots:", newSlotsNeedingButtons, "), only", #ghostSlots, "ghosts available")
                 needsFullRefresh = true
             end
         end
@@ -1767,12 +1850,10 @@ function BagFrame:IncrementalUpdate(dirtyBags)
                 end
             end
             -- Deferred full refresh to update layout structure (category changes,
-            -- new items, etc.). Ghost slots stay visible until this fires.
-            C_Timer.After(1.5, function()
-                if frame and frame:IsShown() and not viewingCharacter then
-                    self:Refresh()
-                end
-            end)
+            -- new items, etc.). Ghost slots stay visible until this fires, which
+            -- is a frame or two later — a looted or split item must not sit
+            -- invisible while the old layout is still on screen.
+            ScheduleCategoryRefresh()
             -- Update footer and return
             local regularTotal, regularFree, specialBags = BagScanner:GetDetailedSlotCounts()
             local totalSlots, freeSlots = BagScanner:GetTotalSlots()
@@ -2666,6 +2747,13 @@ local function ApplyItemInfoRefresh()
     local iconSize = Database:GetSetting("iconSize")
     local hasSearch = SearchBar:HasActiveFilters(frame)
     local bags = BagScanner:GetCachedBags() or {}
+    -- Repainting fixes the icon/overlay but not which section the item sits in.
+    -- Now that its data has resolved it may categorize differently than it did
+    -- when it was scanned with a nil name — if so the layout has to be rebuilt,
+    -- otherwise it stays under the wrong header until an unrelated bag event.
+    local isCategoryView = (Database:GetSetting("bagViewType") or "single") == "category"
+    local CategoryManager = isCategoryView and ns:GetModule("CategoryManager") or nil
+    local needsRelayout = false
     local repainted = 0
     for _, button in ipairs(itemButtons) do
         local oldData = button.itemData
@@ -2673,6 +2761,26 @@ local function ApplyItemInfoRefresh()
             and oldData.bagID and oldData.slot then
             local newData = ItemScanner:ScanSlot(oldData.bagID, oldData.slot)
             if newData and newData.itemID == oldData.itemID then
+                if CategoryManager and not needsRelayout then
+                    local slotKey = GetSlotKey(oldData.bagID, oldData.slot)
+                    local prevCategory = cachedItemCategory[slotKey]
+                    -- Soul/Quiver items are pinned to their section by bag type,
+                    -- not by rules (see BuildCategorySections), so CategorizeItem
+                    -- would never reproduce that value — comparing would report a
+                    -- change on every arrival.
+                    if prevCategory == "Soul" or prevCategory == "Quiver" then
+                        prevCategory = nil
+                    end
+                    if prevCategory then
+                        local newCategory = CategoryManager:CategorizeItem(
+                            newData, oldData.bagID, oldData.slot, false)
+                        if newCategory ~= prevCategory then
+                            ns:Debug("BagFrame: category changed after item info at", slotKey,
+                                tostring(prevCategory), "->", tostring(newCategory))
+                            needsRelayout = true
+                        end
+                    end
+                end
                 local bagData = bags[oldData.bagID]
                 if bagData and bagData.slots then
                     bagData.slots[oldData.slot] = newData
@@ -2690,6 +2798,9 @@ local function ApplyItemInfoRefresh()
     wipe(pendingItemRefresh)
     if repainted > 0 then
         ns:Debug("BagFrame: GET_ITEM_INFO_RECEIVED repainted", repainted, "buttons")
+    end
+    if needsRelayout then
+        ScheduleCategoryRefresh()
     end
 end
 

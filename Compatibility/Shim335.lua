@@ -13,10 +13,19 @@
 local addonName, ns = ...
 
 GudaBagsShim_DB = GudaBagsShim_DB or {}
-local report = { native = {}, polyfilled = {}, missingGlobals = {}, notes = {} }
+local report = { native = {}, polyfilled = {}, missingGlobals = {},
+                 byDesign = {}, notes = {} }
 
 local function markNative(name)      report.native[name] = true end
 local function markPolyfilled(name)  report.polyfilled[name] = true end
+
+-- Something this client lacks that we CHOSE not to supply. Distinct from
+-- missingGlobals, which means "we need this and it isn't here" and is worth a
+-- red warning; byDesign is a decision, and a decision should not look like a
+-- fault every time you log in. Nearly all of these are shared metatable
+-- methods: writing one puts GudaBags on the call path of every Blizzard widget
+-- of that type and leaks our taint into secure code (section 11c).
+local function markByDesign(name, why) report.byDesign[name] = why or true end
 
 -- Sound playback for the whole addon. Defined UP HERE, before any polyfill can
 -- fail, because it is called from click handlers: if anything below aborts this
@@ -1012,6 +1021,10 @@ local widgetPolyfillOK, widgetPolyfillErr = pcall(function()
     polyfillMethod({ "Frame", "Button", "Texture", "FontString", "Cooldown" }, "SetShown",
         function(self, shown) if shown then self:Show() else self:Hide() end end)
 
+    markByDesign("widget:SetEnabled",   "shared Frame/Button metatable -> Core\\Utils.lua")
+    markByDesign("widget:SetFromAlpha", "shared Alpha metatable -> Core\\Utils.lua")
+    markByDesign("widget:SetToAlpha",   "shared Alpha metatable -> Core\\Utils.lua")
+
     -- SetEnabled is NOT polyfilled -- see Core\Utils.lua Utils:SetEnabled.
     --
     -- The premise at the top of this section ("only we ever reach a method the
@@ -1073,7 +1086,8 @@ local widgetPolyfillOK, widgetPolyfillErr = pcall(function()
         elseif type(index.SetObeyStepOnDrag) == "function" then
             markNative("widget:SetObeyStepOnDrag")
         else
-            report.missingGlobals["widget:SetObeyStepOnDrag"] = true
+            markByDesign("widget:SetObeyStepOnDrag",
+                "no-op on a client that already snaps to SetValueStep; call sites nil-guard it")
         end
         slider:Hide()
     end
@@ -1087,6 +1101,9 @@ local widgetPolyfillOK, widgetPolyfillErr = pcall(function()
     -- inside someone else's execution and puts our name on the resulting taint.
     -- The four call sites (UI\ItemButton.lua, UI\QuestBar.lua, UI\TrackedBar.lua)
     -- nil-guard these instead -- they are cosmetic on WotLK anyway.
+    markByDesign("widget:SetDrawEdge",             "shared Cooldown metatable")
+    markByDesign("widget:SetHideCountdownNumbers", "shared Cooldown metatable")
+    markByDesign("widget:SetDrawSwipe",            "shared Cooldown metatable; zero call sites")
 
     probeFrame:Hide()
 end)
@@ -1395,20 +1412,29 @@ do
         report._backdropFlag = nil
         report.time = _G.date and _G.date("%Y-%m-%d %H:%M:%S") or "?"
 
-        -- Count for a compact chat summary
-        local nPoly, nNative, nMissing = 0, 0, 0
-        for _ in pairs(report.polyfilled)     do nPoly = nPoly + 1 end
-        for _ in pairs(report.native)         do nNative = nNative + 1 end
-        for _ in pairs(report.missingGlobals) do nMissing = nMissing + 1 end
-
         GudaBagsShim_DB = report
 
-        local msg = ("|cff00ccffGudaBags shim|r loaded: %d polyfilled, %d native"):format(nPoly, nNative)
-        if nMissing > 0 then
-            local names = {}
-            for g in pairs(report.missingGlobals) do names[#names + 1] = g end
-            msg = msg .. ("  |cffff5555%d MISSING globals: %s|r"):format(nMissing, table.concat(names, ", "))
+        -- SILENT ON A HEALTHY LOAD.
+        --
+        -- This used to announce "N polyfilled, M native" on every login. That is
+        -- a number only the porter cares about, and the one time it did say
+        -- something -- a red "1 MISSING globals: widget:SetObeyStepOnDrag" -- it
+        -- was reporting a deliberate decision as a fault. The full report is in
+        -- GudaBagsShim_DB and one command away (/guda diag shim); chat is not
+        -- the place for it. Only a real gap, or a note from a failed section,
+        -- still speaks up.
+        local missing = {}
+        for g in pairs(report.missingGlobals) do missing[#missing + 1] = g end
+
+        if #missing > 0 then
+            table.sort(missing)
+            DEFAULT_CHAT_FRAME:AddMessage(
+                ("|cff00ccffGudaBags shim|r |cffff5555%d MISSING global(s): %s|r -- run |cffffff00/guda diag shim|r")
+                :format(#missing, table.concat(missing, ", ")))
+        elseif #report.notes > 0 then
+            DEFAULT_CHAT_FRAME:AddMessage(
+                ("|cff00ccffGudaBags shim|r loaded with %d note(s) -- run |cffffff00/guda diag shim|r")
+                :format(#report.notes))
         end
-        DEFAULT_CHAT_FRAME:AddMessage(msg)
     end)
 end
