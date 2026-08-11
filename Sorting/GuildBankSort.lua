@@ -36,6 +36,9 @@ local GuildBankScanner = nil
 -- not going to tell us and checking the slot anyway. The event is the normal
 -- path; this only exists so a dropped event cannot wedge a sort forever.
 local MOVE_TIMEOUT = 0.5
+-- How many MOVE_TIMEOUT ticks a single move may spend unconfirmed before it is
+-- treated as failed. Covers a slow server response without wedging the sort.
+local MOVE_ATTEMPTS = 4
 -- Whole-sort ceiling. 98 slots at worst-case ~0.5s each is well inside this;
 -- anything slower means something is wrong and the sort should give up.
 local SORT_TIMEOUT = 60
@@ -232,9 +235,25 @@ local function OnMoveTimeout()
     end
     if MoveLanded(move) then
         Advance()
-    else
-        Finish("verification failed")
+        return
     end
+
+    -- Not landed yet. One timeout is not proof of failure -- a swap can still be
+    -- in flight, and the reference implementation simply keeps re-checking until
+    -- the destination link matches. Wait a bounded number of ticks before giving
+    -- up, so a slow server costs time rather than a broken sort.
+    move.waits = (move.waits or 0) + 1
+    if move.waits < MOVE_ATTEMPTS then
+        ns:Debug("GuildBankSort: move", state.index, "not landed yet, wait", move.waits)
+        state.timer = C_Timer.NewTimer(MOVE_TIMEOUT, OnMoveTimeout)
+        return
+    end
+
+    ns:Debug("GuildBankSort: move", state.index, "src", move.srcSlot, "dst", move.dstSlot,
+        "expected", tostring(move.itemID),
+        "got", tostring(GetGuildBankItemLink(state.tab, move.dstSlot)),
+        "cursor", CursorHasItem() and "held" or "empty")
+    Finish("verification failed")
 end
 
 --- Issue the next swap. Returns without advancing when it has to wait; the lock
@@ -261,15 +280,18 @@ StepMove = function()
         return
     end
 
-    -- A swap between two OCCUPIED slots takes three calls, not two:
-    --   1. pick up the source        -> cursor holds A, source empties
-    --   2. click the destination     -> A lands there and B comes BACK on the
-    --                                   cursor (this is a swap, not a drop)
-    --   3. click the source          -> B fills the now-empty source
-    -- Stopping after step 2 would leave B stranded on the cursor, and the
-    -- ClearCursor in Finish would send it straight back to the destination,
-    -- undoing the move. When the destination is empty, step 2 completes the move
-    -- and the cursor is already free, so step 3 is skipped.
+    -- Two calls per swap, and then hands off the cursor entirely:
+    --   1. pick up the source     -> cursor holds A, source empties
+    --   2. click the destination  -> the server swaps A with whatever is there
+    --
+    -- Deliberately NOT a third call back at the source. The move is
+    -- server-authoritative: the cursor does not reliably clear in the same frame
+    -- as step 2, so a same-frame CursorHasItem() check reads "still holding" for
+    -- a swap that is merely in flight, and clicking the source again puts the
+    -- item straight back -- undoing the move it just made. Bagnon's guild bank
+    -- sorter (components\sortBtn.lua, DoGuildBankMoves) issues these same two
+    -- calls and then verifies by reading the destination link rather than the
+    -- cursor, which is what the event and timer below do.
     PickupGuildBankItem(state.tab, move.srcSlot)
     if not CursorHasItem() then
         -- Slot was locked, empty, or the server refused the pickup.
@@ -278,17 +300,6 @@ StepMove = function()
     end
 
     PickupGuildBankItem(state.tab, move.dstSlot)
-
-    if CursorHasItem() then
-        PickupGuildBankItem(state.tab, move.srcSlot)
-    end
-
-    if CursorHasItem() then
-        -- Neither slot took what we are carrying; putting it down anywhere else
-        -- would be a guess. Hand it back and stop.
-        Finish("cursor not empty after swap")
-        return
-    end
 
     -- The swap is in flight. GUILDBANK_ITEM_LOCK_CHANGED normally settles it
     -- within a frame or two; this timer both backstops a dropped event and is

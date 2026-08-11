@@ -132,6 +132,10 @@ local function CreateHeader(parent)
                 local GuildBankSort = ns:GetModule("GuildBankSort")
                 if GuildBankSort then
                     GuildBankSort:SortPersonalBank()
+                else
+                    -- Sorting\GuildBankSort.lua is a .toc addition: without a full
+                    -- client restart the file never loads and the button is inert.
+                    ns:Debug("Sort clicked but GuildBankSort module is not loaded")
                 end
             end,
         })
