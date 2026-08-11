@@ -2,7 +2,7 @@
 ## Title: GudaBags
 ## Notes: Clean, unified bag management for all WoW versions
 ## Author: Vati
-## Version: 1.0.6
+## Version: 1.0.7
 ## SavedVariables: GudaBags_DB, GudaBagsShim_DB, GudaBags_Errors, GudaBags_Diag, GudaBags_ErrorSink
 ## SavedVariablesPerCharacter: GudaBags_CharDB
 ## IconTexture: Interface\AddOns\GudaBags\Assets\bags.tga
