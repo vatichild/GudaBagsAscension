@@ -7,6 +7,7 @@ local Constants = ns.Constants
 local L = ns.L
 local SearchParser = ns:GetModule("SearchParser")
 local Database = ns:GetModule("Database")
+local Events = ns:GetModule("Events")
 local Font = ns:GetModule("Font")
 
 local instances = {}
@@ -44,16 +45,100 @@ local QUALITY_NAMES = {
 }
 
 -------------------------------------------------
--- Type chip definitions: {key, localeKey, itemType}
+-- Type chip definitions: {key, localeKey, labelKey}
 -------------------------------------------------
+-- localeKey = compact label (CHIP_TYPE_*, authored for enUS only)
+-- labelKey  = full localized word, reusing the category-header translations
+--             that already exist in all 11 locales. No new strings.
 local TYPE_CHIPS = {
-    {key = "Weapon",       localeKey = "CHIP_TYPE_WPN"},
-    {key = "Armor",        localeKey = "CHIP_TYPE_ARM"},
-    {key = "Consumable",   localeKey = "CHIP_TYPE_CON"},
-    {key = "Trade Goods",  localeKey = "CHIP_TYPE_TRD"},
-    {key = "Quest",        localeKey = "CHIP_TYPE_QST"},
-    {key = "Junk",         localeKey = "CHIP_TYPE_JNK"},
+    {key = "Weapon",       localeKey = "CHIP_TYPE_WPN", labelKey = "CAT_WEAPON"},
+    {key = "Armor",        localeKey = "CHIP_TYPE_ARM", labelKey = "CAT_ARMOR"},
+    {key = "Consumable",   localeKey = "CHIP_TYPE_CON", labelKey = "CAT_CONSUMABLE"},
+    {key = "Trade Goods",  localeKey = "CHIP_TYPE_TRD", labelKey = "CAT_TRADE_GOODS"},
+    {key = "Quest",        localeKey = "CHIP_TYPE_QST", labelKey = "CAT_QUEST"},
+    {key = "Junk",         localeKey = "CHIP_TYPE_JNK", labelKey = "CAT_JUNK"},
 }
+
+-------------------------------------------------
+-- Chip label resolution
+--
+-- The inline chip strip shares one non-wrapping row with the quality dots and
+-- the special chips, so it is width-constrained. The dropdown menu rows are
+-- full-width and are not.
+--
+-- Strip: use the locale's own word, but only when the whole set fits the
+-- budget; otherwise the entire strip falls back to the compact enUS
+-- abbreviations so it stays visually consistent rather than mixing
+-- "Waffe" with "Trd".
+--
+-- This needs no per-locale special-casing, because it measures what actually
+-- renders: CJK words are narrower than "Wpn", so those locales get native
+-- labels, while enUS ("Consumable") and the long-word European locales
+-- ("Handwerkswaren") keep the compact form.
+-------------------------------------------------
+local MAX_TYPE_CHIP_LABEL_WIDTH = 40
+local useCompactTypeLabels = nil
+
+local function UseCompactTypeLabels()
+    if useCompactTypeLabels ~= nil then
+        return useCompactTypeLabels
+    end
+
+    local probe = UIParent:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
+    if Font then Font:Override(probe) end
+
+    useCompactTypeLabels = false
+    for _, chipDef in ipairs(TYPE_CHIPS) do
+        local full = chipDef.labelKey and L[chipDef.labelKey]
+        if not full or full == "" then
+            useCompactTypeLabels = true
+            break
+        end
+        probe:SetText(full)
+        if (probe:GetStringWidth() or 0) > MAX_TYPE_CHIP_LABEL_WIDTH then
+            useCompactTypeLabels = true
+            break
+        end
+    end
+
+    probe:Hide()
+    return useCompactTypeLabels
+end
+
+-- Full localized word: dropdown rows and tooltips, where width is not a concern
+local function ChipFullLabel(chipDef)
+    return (chipDef.labelKey and L[chipDef.labelKey])
+        or L[chipDef.localeKey] or chipDef.key
+end
+
+-- Inline strip label: compact when the localized set would not fit
+local function ChipStripLabel(chipDef)
+    if chipDef.labelKey and not UseCompactTypeLabels() then
+        return ChipFullLabel(chipDef)
+    end
+    return L[chipDef.localeKey] or chipDef.key
+end
+
+-- classID → chip key, so chip matching is locale-independent (itemType from
+-- GetItemInfo is translated per client, while the chip keys are English).
+-- "Junk" is quality-based, not a class, and is handled separately in the
+-- matcher below.
+--
+-- The name→ID table comes from the shim rather than a second copy here: it is
+-- the same one the scanners reconstruct classIDs with on 3.3.5a
+-- (Compatibility\Shim335.lua), which loads first per the .toc.
+local CHIP_KEY_BY_CLASS = {}
+do
+    local classByName = ns.Compat and ns.Compat.CLASS_NAME_TO_ID
+    if classByName then
+        for _, chip in ipairs(TYPE_CHIPS) do
+            local classID = classByName[chip.key]
+            if classID then
+                CHIP_KEY_BY_CLASS[classID] = chip.key
+            end
+        end
+    end
+end
 
 -------------------------------------------------
 -- Special chip definitions: {key, localeKey}
@@ -64,9 +149,110 @@ local SPECIAL_CHIPS = {
     {key = "openable", localeKey = "CHIP_SPECIAL_OPENABLE"},
     {key = "learnable", localeKey = "CHIP_SPECIAL_LEARNABLE"},
     -- Gear whose appearance can still be collected -- the same signal as the
-    -- transmog dot (Data\ItemScanner.lua). Ascension only.
+    -- transmog dot (Data\ItemScanner.lua). Ascension only, and native here, so
+    -- unlike upstream it needs no `available` predicate.
     {key = "mog", localeKey = "CHIP_SPECIAL_MOG"},
 }
+
+-- A chip may declare `available = function() ... end` when its filter can only
+-- match on some clients/addons; without one it is always shown. Nothing in this
+-- build sets it today, but the strip, the dropdown and the settings picker are
+-- all written against it so adding such a chip stays a one-line change.
+local function ChipAvailable(chipDef)
+    return chipDef.available == nil or chipDef.available() == true
+end
+
+-------------------------------------------------
+-- Per-chip visibility (user setting)
+--
+-- `hiddenChips` stores only the chips the user switched off, so a chip added in
+-- a later version is visible by default and needs no settings migration. Keys are
+-- strings in every group ("q:3", "t:Weapon", "s:boe") so SavedVariables round-trips
+-- them uniformly -- a raw numeric quality index would serialise differently from the
+-- rest and make the table awkward to read.
+-------------------------------------------------
+local CHIP_GROUP_QUALITY = "quality"
+local CHIP_GROUP_TYPE    = "type"
+local CHIP_GROUP_SPECIAL = "special"
+
+-- Setting keys are built once at load and stamped onto the definitions, because the
+-- visibility check runs on the frame-resize path -- concatenating them per call would
+-- allocate a string every time a bag is dragged wider.
+local QUALITY_SETTING_KEYS = {}
+for q = 0, 7 do
+    QUALITY_SETTING_KEYS[q] = "q:" .. q
+end
+for _, chipDef in ipairs(TYPE_CHIPS) do
+    chipDef.settingKey = "t:" .. chipDef.key
+end
+for _, chipDef in ipairs(SPECIAL_CHIPS) do
+    chipDef.settingKey = "s:" .. chipDef.key
+end
+
+local EMPTY_HIDDEN = {}
+
+local function GetHiddenChips()
+    if not Database then Database = ns:GetModule("Database") end
+    return (Database and Database:GetSetting("hiddenChips")) or EMPTY_HIDDEN
+end
+
+local function ChipHidden(settingKey)
+    return GetHiddenChips()[settingKey] == true
+end
+
+-- Special chips minus any whose owning addon is absent. Rebuilt per call rather
+-- than memoised, so a load-on-demand addon appearing later is picked up. This is
+-- what the strip is *built* from -- user-hidden chips are still created, because
+-- hiding one must not require a CreateFrame later to bring it back.
+local function GetAvailableSpecialChips()
+    local list = {}
+    for _, chipDef in ipairs(SPECIAL_CHIPS) do
+        if ChipAvailable(chipDef) then
+            list[#list + 1] = chipDef
+        end
+    end
+    return list
+end
+
+-- What the user should actually see. The overflow dropdown reads from these so it
+-- can never disagree with the inline strip about which chips exist.
+local function GetVisibleTypeChips()
+    local list = {}
+    for _, chipDef in ipairs(TYPE_CHIPS) do
+        if not ChipHidden(chipDef.settingKey) then
+            list[#list + 1] = chipDef
+        end
+    end
+    return list
+end
+
+local function GetVisibleSpecialChips()
+    local list = {}
+    for _, chipDef in ipairs(SPECIAL_CHIPS) do
+        if ChipAvailable(chipDef) and not ChipHidden(chipDef.settingKey) then
+            list[#list + 1] = chipDef
+        end
+    end
+    return list
+end
+
+-- The strip is pointless when the user hid every chip in it; treated as "chips off"
+-- so the reserved height is reclaimed rather than left as an empty band. Written as
+-- bare loops rather than reusing the list builders above: this runs on the frame
+-- refresh path and must not allocate.
+local function AnyChipVisible()
+    local hidden = GetHiddenChips()
+    for q = 0, 7 do
+        if hidden[QUALITY_SETTING_KEYS[q]] ~= true then return true end
+    end
+    for _, chipDef in ipairs(TYPE_CHIPS) do
+        if hidden[chipDef.settingKey] ~= true then return true end
+    end
+    for _, chipDef in ipairs(SPECIAL_CHIPS) do
+        if hidden[chipDef.settingKey] ~= true and ChipAvailable(chipDef) then return true end
+    end
+    return false
+end
 
 -------------------------------------------------
 -- Search Overlay (shared across instances)
@@ -190,6 +376,22 @@ local function HasAnyFilter(state)
     return false
 end
 
+-- Whether the search box's clear (X) button should be visible.
+--
+-- Deliberately NOT HasAnyFilter: that button's OnClick only clears the search
+-- text and the equipment-set filter, so showing it for an active chip would
+-- offer the user a control that does nothing to that chip. Chips are cleared by
+-- the chip strip's own clear-all button.
+--
+-- `text` lets OnTextChanged pass the incoming value, since it runs before
+-- searchBar.searchText has been updated. Both callers share this one predicate
+-- so they cannot drift apart.
+local function ShouldShowSearchClear(searchBar, text)
+    if text == nil then text = searchBar.searchText end
+    local hasText = text ~= nil and text ~= ""
+    return hasText or searchBar.filterState.equipSet ~= nil
+end
+
 -------------------------------------------------
 -- Chip Strip UI
 -------------------------------------------------
@@ -234,14 +436,9 @@ end
 local function NotifyFilterChanged(searchBar)
     UpdateChipStripVisibility(searchBar)
     UpdateTransferButton(searchBar)
-    -- Show/hide clear button based on any active filter
+    -- The search box's clear button tracks only what it can actually clear.
     if searchBar.clearButton then
-        local hasText = searchBar.searchText and searchBar.searchText ~= ""
-        if hasText or HasAnyFilter(searchBar.filterState) then
-            searchBar.clearButton:Show()
-        elseif not hasText then
-            searchBar.clearButton:Hide()
-        end
+        searchBar.clearButton:SetShown(ShouldShowSearchClear(searchBar))
     end
     -- Update equip set button color when active
     if searchBar.equipSetButton then
@@ -315,16 +512,23 @@ local function CreateQualityDot(chipStrip, qualityIndex, searchBar)
     end)
 
     btn.qualityIndex = qualityIndex
+    btn.chipSettingKey = QUALITY_SETTING_KEYS[qualityIndex]
     return btn
 end
 
-local function CreateFilterChip(chipStrip, chipDef, searchBar, filterCategory, activeColor)
+local function CreateFilterChip(chipStrip, chipDef, searchBar, filterCategory, activeColor, settingKey)
     local btn = CreateFrame("Button", nil, chipStrip)
     local label = btn:CreateFontString(nil, "OVERLAY", "GameFontNormalSmall")
     Font:Override(label)
     label:SetPoint("CENTER", 0, 0)
-    label:SetText(L[chipDef.localeKey] or chipDef.key)
+    local stripLabel = ChipStripLabel(chipDef)
+    label:SetText(stripLabel)
     btn.label = label
+
+    -- When the strip shows a compact label, the full localized word is only
+    -- available on hover.
+    local fullLabel = ChipFullLabel(chipDef)
+    btn.tooltipText = (fullLabel ~= stripLabel) and fullLabel or nil
 
     local textWidth = label:GetStringWidth() or 20
     btn:SetSize(textWidth + 10, Constants.FRAME.CHIP_SIZE)
@@ -341,11 +545,19 @@ local function CreateFilterChip(chipStrip, chipDef, searchBar, filterCategory, a
         if not searchBar.filterState[filterCategory][chipDef.key] then
             self.bg:SetVertexColor(0.25, 0.25, 0.25, 0.8)
         end
+        if self.tooltipText then
+            GameTooltip:SetOwner(self, "ANCHOR_TOP")
+            GameTooltip:SetText(self.tooltipText, 1, 1, 1)
+            GameTooltip:Show()
+        end
     end)
 
     btn:SetScript("OnLeave", function(self)
         if not searchBar.filterState[filterCategory][chipDef.key] then
             self.bg:SetVertexColor(0.15, 0.15, 0.15, 0.8)
+        end
+        if self.tooltipText then
+            GameTooltip:Hide()
         end
     end)
 
@@ -364,6 +576,7 @@ local function CreateFilterChip(chipStrip, chipDef, searchBar, filterCategory, a
     end)
 
     btn.chipKey = chipDef.key
+    btn.chipSettingKey = settingKey
     return btn
 end
 
@@ -371,15 +584,16 @@ local TYPE_CHIP_COLOR = {0.7, 0.55, 0.0, 0.9}
 local SPECIAL_CHIP_COLOR = {0.2, 0.6, 0.8, 0.9}
 
 local function CreateTypeChip(chipStrip, chipDef, searchBar)
-    return CreateFilterChip(chipStrip, chipDef, searchBar, "types", TYPE_CHIP_COLOR)
+    return CreateFilterChip(chipStrip, chipDef, searchBar, "types", TYPE_CHIP_COLOR, chipDef.settingKey)
 end
 
 local function CreateSpecialChip(chipStrip, chipDef, searchBar)
-    return CreateFilterChip(chipStrip, chipDef, searchBar, "specials", SPECIAL_CHIP_COLOR)
+    return CreateFilterChip(chipStrip, chipDef, searchBar, "specials", SPECIAL_CHIP_COLOR, chipDef.settingKey)
 end
 
--- Forward declaration (defined later with dropdown logic)
-local UpdateDropdownLabel
+-- Forward declarations (defined further down)
+local UpdateDropdownLabel   -- with the dropdown logic
+local LayoutChipStrip       -- with the responsive layout, next to AreFilterChipsEnabled
 
 local function ResetChipVisuals(searchBar)
     -- Reset quality dots
@@ -424,6 +638,12 @@ local function ClearEquipSetFilter(searchBar)
         if searchBar.searchBox.placeholder then
             searchBar.searchBox.placeholder:Show()
         end
+    end
+    -- Re-evaluate the clear button. Clear/ClearAllFilters call SetText("")
+    -- before nilling equipSet, so the OnTextChanged that fired back then still
+    -- saw an active set and left the button shown with nothing left to clear.
+    if searchBar.clearButton then
+        searchBar.clearButton:SetShown(ShouldShowSearchClear(searchBar))
     end
 end
 
@@ -489,8 +709,11 @@ local function ShowTypesDropdownMenu(searchBar, anchor)
     local maxWidth = 0
     local itemIndex = 0
 
+    local visibleTypes = GetVisibleTypeChips()
+    local visibleSpecials = GetVisibleSpecialChips()
+
     -- Add type chips
-    for _, chipDef in ipairs(TYPE_CHIPS) do
+    for _, chipDef in ipairs(visibleTypes) do
         itemIndex = itemIndex + 1
         local item = typesDropdownMenu.items[itemIndex]
         if not item then
@@ -508,7 +731,8 @@ local function ShowTypesDropdownMenu(searchBar, anchor)
             typesDropdownMenu.items[itemIndex] = item
         end
 
-        item.label:SetText(L[chipDef.localeKey] or chipDef.key)
+        -- Menu rows are full-width, so always show the full localized word
+        item.label:SetText(ChipFullLabel(chipDef))
         item.chipKey = chipDef.key
         item.chipCategory = "types"
         item:SetPoint("TOPLEFT", typesDropdownMenu, "TOPLEFT", 4, yOffset)
@@ -566,11 +790,14 @@ local function ShowTypesDropdownMenu(searchBar, anchor)
         item:Show()
     end
 
-    -- Add separator
-    yOffset = yOffset - 4
+    -- Add separator -- only when there are rows on both sides of it, otherwise the
+    -- menu picks up 4px of dead space at its top or bottom edge.
+    if #visibleTypes > 0 and #visibleSpecials > 0 then
+        yOffset = yOffset - 4
+    end
 
     -- Add special chips
-    for _, chipDef in ipairs(SPECIAL_CHIPS) do
+    for _, chipDef in ipairs(visibleSpecials) do
         itemIndex = itemIndex + 1
         local item = typesDropdownMenu.items[itemIndex]
         if not item then
@@ -588,7 +815,8 @@ local function ShowTypesDropdownMenu(searchBar, anchor)
             typesDropdownMenu.items[itemIndex] = item
         end
 
-        item.label:SetText(L[chipDef.localeKey] or chipDef.key)
+        -- Menu rows are full-width, so always show the full localized word
+        item.label:SetText(ChipFullLabel(chipDef))
         item.chipKey = chipDef.key
         item.chipCategory = "specials"
         item:SetPoint("TOPLEFT", typesDropdownMenu, "TOPLEFT", 4, yOffset)
@@ -661,6 +889,74 @@ end
 
 local CHIP_COLLAPSE_WIDTH = 420
 
+-- The "not filtering on this" look. The same two calls are open-coded in several
+-- older spots in this file (ResetChipVisuals, the chip and dropdown OnClick handlers);
+-- new code goes through here so the colours have one home.
+local function SetChipInactive(chip)
+    chip.label:SetTextColor(0.55, 0.55, 0.55)
+    chip.bg:SetVertexColor(0.15, 0.15, 0.15, 0.8)
+end
+
+local function SetQualityDotInactive(dot)
+    dot.dot:SetAlpha(0.35)
+    dot.border:Hide()
+end
+
+-- Chip frames are created once and never destroyed, so "hidden by the user" is a
+-- render-time question, not a build-time one: bringing a chip back must never need
+-- a CreateFrame on a refresh path.
+local function ChipShown(chip)
+    return not ChipHidden(chip.chipSettingKey)
+end
+
+local function CountShownChips(chips)
+    local n = 0
+    for _, chip in ipairs(chips) do
+        if ChipShown(chip) then n = n + 1 end
+    end
+    return n
+end
+
+-- Single owner of "what is on the strip": shows the chips the user kept, hides the
+-- rest, and applies the separator rule (a separator with nothing on one side is just
+-- a stray pixel line). LayoutChipStrip adds positioning on top of this; the expand
+-- path in UpdateChipLayout only needs to restore what the collapse path hid.
+-- Returns the three counts so callers don't walk the arrays a second time.
+local function ApplyChipVisibility(searchBar)
+    local shownDots, shownTypes, shownSpecials = 0, 0, 0
+
+    for _, dot in ipairs(searchBar.qualityDots) do
+        if ChipShown(dot) then dot:Show() shownDots = shownDots + 1 else dot:Hide() end
+    end
+    for _, chip in ipairs(searchBar.typeChips) do
+        if ChipShown(chip) then chip:Show() shownTypes = shownTypes + 1 else chip:Hide() end
+    end
+    for _, chip in ipairs(searchBar.specialChips) do
+        if ChipShown(chip) then chip:Show() shownSpecials = shownSpecials + 1 else chip:Hide() end
+    end
+
+    -- Show/Hide rather than SetShown: these two are Textures, and the surrounding code
+    -- has only ever used Show/Hide on them.
+    if searchBar.chipSep1 then
+        if shownDots > 0 and shownTypes > 0 then searchBar.chipSep1:Show() else searchBar.chipSep1:Hide() end
+    end
+    if searchBar.chipSep2 then
+        if shownTypes > 0 and shownSpecials > 0 then searchBar.chipSep2:Show() else searchBar.chipSep2:Hide() end
+    end
+
+    return shownDots, shownTypes, shownSpecials
+end
+
+-- Advances the running x-offset past a separator, but only when ApplyChipVisibility
+-- decided it earns its place.
+local function PlaceSeparator(sep, chipStrip, xOffset, spacing)
+    if not sep or not sep:IsShown() then return xOffset end
+    xOffset = xOffset + 2
+    sep:ClearAllPoints()
+    sep:SetPoint("LEFT", chipStrip, "LEFT", xOffset, 0)
+    return xOffset + 1 + spacing
+end
+
 local function UpdateChipLayout(searchBar)
     local chipStrip = searchBar.chipStrip
     if not chipStrip or not chipStrip:IsShown() then return end
@@ -683,8 +979,9 @@ local function UpdateChipLayout(searchBar)
 
         local spacing = Constants.FRAME.CHIP_SPACING
         local chipSize = Constants.FRAME.CHIP_SIZE
-        local qualityWidth = 4 + (#searchBar.qualityDots * (chipSize + spacing))
-        local sepWidth = 2 + 1 + spacing
+        local shownDots = CountShownChips(searchBar.qualityDots)
+        local qualityWidth = 4 + (shownDots * (chipSize + spacing))
+        local sepWidth = (shownDots > 0) and (2 + 1 + spacing) or 0
 
         local dropdown = searchBar.typesDropdown
         if dropdown then
@@ -694,11 +991,9 @@ local function UpdateChipLayout(searchBar)
             UpdateDropdownLabel(searchBar)
         end
     else
-        -- Normal: show all chips as buttons, hide dropdown
-        for _, chip in ipairs(searchBar.typeChips) do chip:Show() end
-        for _, chip in ipairs(searchBar.specialChips) do chip:Show() end
-        if searchBar.chipSep1 then searchBar.chipSep1:Show() end
-        if searchBar.chipSep2 then searchBar.chipSep2:Show() end
+        -- Normal: restore the chips the user kept, hide dropdown. Positions are already
+        -- correct -- LayoutChipStrip set them and only the collapse path above hides.
+        ApplyChipVisibility(searchBar)
         if searchBar.typesDropdown then searchBar.typesDropdown:Hide() end
     end
 end
@@ -754,7 +1049,7 @@ local function CreateChipStrip(searchBar, parent)
 
     -- Special chips
     searchBar.specialChips = {}
-    for _, chipDef in ipairs(SPECIAL_CHIPS) do
+    for _, chipDef in ipairs(GetAvailableSpecialChips()) do
         local chip = CreateSpecialChip(chipStrip, chipDef, searchBar)
         chip:SetPoint("LEFT", chipStrip, "LEFT", xOffset, 0)
         xOffset = xOffset + chip:GetWidth() + spacing
@@ -768,11 +1063,15 @@ local function CreateChipStrip(searchBar, parent)
     -- Types dropdown button (hidden by default, shown on overflow)
     local typesDropdown = CreateFrame("Button", nil, chipStrip)
     typesDropdown:SetHeight(Constants.FRAME.CHIP_SIZE)
-    -- Filter icon
+    -- Overflow menu icon. Deliberately the generic hamburger, not categories.tga:
+    -- that texture is registered as `viewCycle` (single/category/split layout) in
+    -- UI\IconButton.lua, so reusing it here made one glyph mean two unrelated
+    -- things on screen at once. A hamburger is a generic "opens a menu"
+    -- affordance and carries no competing meaning.
     local dropIcon = typesDropdown:CreateTexture(nil, "ARTWORK")
     dropIcon:SetSize(10, 10)
     dropIcon:SetPoint("LEFT", typesDropdown, "LEFT", 4, 0)
-    dropIcon:SetTexture("Interface\\AddOns\\GudaBags\\Assets\\categories.tga")
+    dropIcon:SetTexture("Interface\\AddOns\\GudaBags\\Assets\\more.tga")
     dropIcon:SetVertexColor(0.55, 0.55, 0.55)
     typesDropdown.icon = dropIcon
     -- Label
@@ -853,6 +1152,12 @@ local function CreateChipStrip(searchBar, parent)
     chipStrip:SetScript("OnSizeChanged", function()
         UpdateChipLayout(searchBar)
     end)
+
+    -- Apply the user's per-chip visibility to the freshly built strip. Frames above
+    -- are created for every chip regardless, so re-showing one later never needs a
+    -- CreateFrame; only the positions below change. Required here because the guild
+    -- bank never calls SetNarrowMode, which is the other path into this layout.
+    LayoutChipStrip(searchBar)
 
     return chipStrip
 end
@@ -1227,12 +1532,12 @@ local function CreateSearchBar(parent)
         if text == "" and not hasEquipSet then
             placeholder:Show()
             searchIcon:SetVertexColor(0.6, 0.6, 0.6)
-            clearButton:Hide()
         else
             if text ~= "" then placeholder:Hide() end
             searchIcon:SetVertexColor(1, 0.82, 0)
-            clearButton:Show()
         end
+        -- Pass `text` explicitly: searchBar.searchText is still the old value here.
+        clearButton:SetShown(ShouldShowSearchClear(searchBar, text))
         searchBar.searchText = text
 
         -- Parse search input through SearchParser
@@ -1324,7 +1629,261 @@ local function AreFilterChipsEnabled()
     if not Database then
         Database = ns:GetModule("Database")
     end
-    return Database and Database:GetSetting("showFilterChips") or false
+    if not (Database and Database:GetSetting("showFilterChips")) then return false end
+    -- Hiding every individual chip is the same request as turning the strip off, so
+    -- fold it into this one gate: every consumer (Show/Hide/GetTotalHeight/layout)
+    -- already routes through here, and the reserved height gets reclaimed for free.
+    return AnyChipVisible()
+end
+
+-- Positions the chip strip for the instance's current responsive mode. Extracted
+-- from SetNarrowMode so a settings change can re-run it -- SetNarrowMode early-returns
+-- when the mode is unchanged, which is exactly the case when only chip visibility moved.
+LayoutChipStrip = function(instance)
+    if not instance.chipStrip or not AreFilterChipsEnabled() then return end
+
+    local spacing = Constants.FRAME.CHIP_SPACING
+    local chipSize = Constants.FRAME.CHIP_SIZE
+    local smallChipSize = 10
+
+    if instance.isNarrowMode then
+        -- < 220: 2-row chip strip with Types dropdown, smaller dots
+        instance.chipStrip:SetHeight(28)
+
+        ApplyChipVisibility(instance)
+
+        local xOffset = 4
+        for _, dot in ipairs(instance.qualityDots) do
+            if dot:IsShown() then
+                dot:SetSize(smallChipSize, smallChipSize)
+                if dot.dot then dot.dot:SetSize(smallChipSize - 4, smallChipSize - 4) end
+                dot:ClearAllPoints()
+                dot:SetPoint("TOPLEFT", instance.chipStrip, "TOPLEFT", xOffset, -1)
+                xOffset = xOffset + smallChipSize + spacing
+            end
+        end
+
+        if instance.chipClearButton then
+            instance.chipClearButton:ClearAllPoints()
+            instance.chipClearButton:SetPoint("TOPRIGHT", instance.chipStrip, "TOPRIGHT", -4, -1)
+        end
+
+        -- Row 2 is the Types dropdown, so no inline chips or separators here whatever
+        -- ApplyChipVisibility decided above.
+        if instance.chipSep1 then instance.chipSep1:Hide() end
+        if instance.chipSep2 then instance.chipSep2:Hide() end
+        for _, chip in ipairs(instance.typeChips) do chip:Hide() end
+        for _, chip in ipairs(instance.specialChips) do chip:Hide() end
+
+        if instance.typesDropdown then
+            instance.typesDropdown:ClearAllPoints()
+            instance.typesDropdown:SetPoint("BOTTOMLEFT", instance.chipStrip, "BOTTOMLEFT", 0, 2)
+            instance.typesDropdown:Show()
+            UpdateDropdownLabel(instance)
+        end
+        return
+    end
+
+    -- >= 220: single row of full-size dots followed by the inline chips. UpdateChipLayout
+    -- below collapses them into the Types dropdown if they still don't fit.
+    instance.chipStrip:SetHeight(Constants.FRAME.CHIP_STRIP_HEIGHT)
+
+    -- Decide visibility once; the loops below only position what is already shown.
+    ApplyChipVisibility(instance)
+
+    local xOffset = 4
+    for _, dot in ipairs(instance.qualityDots) do
+        if dot:IsShown() then
+            dot:SetSize(chipSize, chipSize)
+            if dot.dot then dot.dot:SetSize(chipSize - 4, chipSize - 4) end
+            dot:ClearAllPoints()
+            dot:SetPoint("LEFT", instance.chipStrip, "LEFT", xOffset, 0)
+            xOffset = xOffset + chipSize + spacing
+        end
+    end
+
+    xOffset = PlaceSeparator(instance.chipSep1, instance.chipStrip, xOffset, spacing)
+
+    for _, chip in ipairs(instance.typeChips) do
+        if chip:IsShown() then
+            chip:ClearAllPoints()
+            chip:SetPoint("LEFT", instance.chipStrip, "LEFT", xOffset, 0)
+            xOffset = xOffset + chip:GetWidth() + spacing
+        end
+    end
+
+    xOffset = PlaceSeparator(instance.chipSep2, instance.chipStrip, xOffset, spacing)
+
+    for _, chip in ipairs(instance.specialChips) do
+        if chip:IsShown() then
+            chip:ClearAllPoints()
+            chip:SetPoint("LEFT", instance.chipStrip, "LEFT", xOffset, 0)
+            xOffset = xOffset + chip:GetWidth() + spacing
+        end
+    end
+
+    if instance.chipClearButton then
+        instance.chipClearButton:ClearAllPoints()
+        instance.chipClearButton:SetPoint("RIGHT", instance.chipStrip, "RIGHT", -4, 0)
+    end
+
+    -- Re-measure rather than reuse the build-time value: hiding chips must be able to
+    -- un-collapse a strip that only overflowed because of the chips that are now gone.
+    instance.chipsNaturalWidth = xOffset + 4
+
+    UpdateChipLayout(instance)
+end
+
+-- A filter left active on a chip the user just hid would keep filtering with no
+-- visible control to clear it -- the classic "silently does nothing" failure. Only the
+-- pruned chips are reset to their inactive look; ResetChipVisuals would wrongly
+-- deactivate the chips whose filters are still live.
+local function PruneHiddenFilters(instance)
+    local state = instance.filterState
+    if not state then return false end
+
+    local changed = false
+    for _, dot in ipairs(instance.qualityDots or {}) do
+        if state.qualities[dot.qualityIndex] and not ChipShown(dot) then
+            state.qualities[dot.qualityIndex] = nil
+            SetQualityDotInactive(dot)
+            changed = true
+        end
+    end
+    for _, chip in ipairs(instance.typeChips or {}) do
+        if state.types[chip.chipKey] and not ChipShown(chip) then
+            state.types[chip.chipKey] = nil
+            SetChipInactive(chip)
+            changed = true
+        end
+    end
+    for _, chip in ipairs(instance.specialChips or {}) do
+        if state.specials[chip.chipKey] and not ChipShown(chip) then
+            state.specials[chip.chipKey] = nil
+            SetChipInactive(chip)
+            changed = true
+        end
+    end
+    return changed
+end
+
+-------------------------------------------------
+-- Per-chip visibility: public API
+--
+-- SearchBar owns the chip definitions, so it owns the question of which chips exist
+-- and which the user kept. The settings UI reads the catalogue from here rather than
+-- keeping a second copy of the chip lists that could drift out of sync.
+-------------------------------------------------
+
+-- Ordered {group, key, settingKey, label, color} entries. Rebuilt per call so a chip
+-- whose `available` predicate flips after login is picked up. Labels reuse the
+-- existing translations -- no new strings.
+function SearchBar:GetChipCatalogue()
+    local catalogue = {}
+
+    for q = 0, 7 do
+        local colors = Constants.QUALITY_COLORS[q]
+        if colors then
+            catalogue[#catalogue + 1] = {
+                group = CHIP_GROUP_QUALITY,
+                -- Quality chips render as a bare colour swatch, not a labelled chip.
+                -- Flagged here so consumers don't have to branch on the group name.
+                swatch = true,
+                key = q,
+                settingKey = QUALITY_SETTING_KEYS[q],
+                label = L[QUALITY_NAMES[q]] or QUALITY_NAMES[q],
+                color = colors,
+            }
+        end
+    end
+
+    for _, chipDef in ipairs(TYPE_CHIPS) do
+        catalogue[#catalogue + 1] = {
+            group = CHIP_GROUP_TYPE,
+            key = chipDef.key,
+            settingKey = chipDef.settingKey,
+            label = ChipStripLabel(chipDef),
+            tooltip = ChipFullLabel(chipDef),
+            color = TYPE_CHIP_COLOR,
+        }
+    end
+
+    -- Every special chip, including ones currently unavailable: the settings picker
+    -- builds its cells once, and a chip's `available` predicate can flip later.
+    -- `availableFn` lets the picker re-decide per repaint.
+    for _, chipDef in ipairs(SPECIAL_CHIPS) do
+        catalogue[#catalogue + 1] = {
+            group = CHIP_GROUP_SPECIAL,
+            key = chipDef.key,
+            settingKey = chipDef.settingKey,
+            label = ChipStripLabel(chipDef),
+            tooltip = ChipFullLabel(chipDef),
+            color = SPECIAL_CHIP_COLOR,
+            availableFn = chipDef.available,
+        }
+    end
+
+    return catalogue
+end
+
+function SearchBar:IsChipHidden(settingKey)
+    return ChipHidden(settingKey)
+end
+
+function SearchBar:SetChipHidden(settingKey, hidden)
+    if not Database then Database = ns:GetModule("Database") end
+    if not Database then return end
+
+    -- Copy-on-write: Database seeds missing settings with the DEFAULTS table itself
+    -- (a plain reference assignment), so mutating what GetSetting returned would edit
+    -- Constants.DEFAULTS.hiddenChips for every character loaded this session.
+    local current = Database:GetSetting("hiddenChips") or {}
+    local updated = {}
+    for k, v in pairs(current) do updated[k] = v end
+    updated[settingKey] = hidden and true or nil
+
+    Database:SetSetting("hiddenChips", updated)
+    if Events then
+        Events:Fire("SETTING_CHANGED", "hiddenChips", updated)
+    end
+end
+
+-- True when the strip has at least one chip left to show and is switched on.
+function SearchBar:AreChipsVisible()
+    return AreFilterChipsEnabled()
+end
+
+-- Re-apply chip visibility to every live search bar. Cheap enough to run inline:
+-- it touches ~20 frames per instance and only fires on a settings or profile change.
+function SearchBar:RefreshChipVisibility()
+    for _, instance in pairs(instances) do
+        local pruned = PruneHiddenFilters(instance)
+        -- Hide only, never show: the owning frame decides whether the strip belongs
+        -- on screen at all (the mail frame force-hides it), and its Refresh -- driven
+        -- by the same SETTING_CHANGED -- is what brings it back via SearchBar:Show.
+        if instance.chipStrip and not AreFilterChipsEnabled() then
+            instance.chipStrip:Hide()
+        end
+        LayoutChipStrip(instance)
+        if instance.typesDropdown then
+            UpdateDropdownLabel(instance)
+        end
+        if pruned then
+            NotifyFilterChanged(instance)
+        end
+    end
+end
+
+if Events then
+    Events:Register("SETTING_CHANGED", function(_, key)
+        if key == "hiddenChips" or key == "showFilterChips" then
+            SearchBar:RefreshChipVisibility()
+        end
+    end, SearchBar)
+
+    Events:Register("PROFILE_LOADED", function()
+        SearchBar:RefreshChipVisibility()
+    end, SearchBar)
 end
 
 function SearchBar:Show(parent)
@@ -1463,147 +2022,7 @@ function SearchBar:SetNarrowMode(parent, isCompact, isNarrow)
         end
     end
 
-    -- Update chip strip layout
-    if instance.chipStrip and AreFilterChipsEnabled() then
-        local spacing = Constants.FRAME.CHIP_SPACING
-        local chipSize = Constants.FRAME.CHIP_SIZE
-        local smallChipSize = 10
-
-        if isNarrow then
-            -- < 220: 2-row chip strip with Types dropdown, smaller dots
-            instance.chipStrip:SetHeight(28)
-
-            local xOffset = 4
-            for _, dot in ipairs(instance.qualityDots) do
-                dot:SetSize(smallChipSize, smallChipSize)
-                if dot.dot then dot.dot:SetSize(smallChipSize - 4, smallChipSize - 4) end
-                dot:ClearAllPoints()
-                dot:SetPoint("TOPLEFT", instance.chipStrip, "TOPLEFT", xOffset, -1)
-                xOffset = xOffset + smallChipSize + spacing
-            end
-
-            if instance.chipClearButton then
-                instance.chipClearButton:ClearAllPoints()
-                instance.chipClearButton:SetPoint("TOPRIGHT", instance.chipStrip, "TOPRIGHT", -4, -1)
-            end
-
-            -- Hide inline chips, show Types dropdown on row 2
-            if instance.chipSep1 then instance.chipSep1:Hide() end
-            if instance.chipSep2 then instance.chipSep2:Hide() end
-            for _, chip in ipairs(instance.typeChips) do chip:Hide() end
-            for _, chip in ipairs(instance.specialChips) do chip:Hide() end
-
-            if instance.typesDropdown then
-                instance.typesDropdown:ClearAllPoints()
-                instance.typesDropdown:SetPoint("BOTTOMLEFT", instance.chipStrip, "BOTTOMLEFT", 0, 2)
-                instance.typesDropdown:Show()
-                UpdateDropdownLabel(instance)
-            end
-        elseif isCompact then
-            -- < 260 but >= 220: normal dots on single row, normal type chips
-            instance.chipStrip:SetHeight(Constants.FRAME.CHIP_STRIP_HEIGHT)
-
-            local xOffset = 4
-            for _, dot in ipairs(instance.qualityDots) do
-                dot:SetSize(chipSize, chipSize)
-                if dot.dot then dot.dot:SetSize(chipSize - 4, chipSize - 4) end
-                dot:ClearAllPoints()
-                dot:SetPoint("LEFT", instance.chipStrip, "LEFT", xOffset, 0)
-                xOffset = xOffset + chipSize + spacing
-            end
-
-            -- Separator 1
-            if instance.chipSep1 then
-                instance.chipSep1:ClearAllPoints()
-                xOffset = xOffset + 2
-                instance.chipSep1:SetPoint("LEFT", instance.chipStrip, "LEFT", xOffset, 0)
-                instance.chipSep1:Show()
-                xOffset = xOffset + 1 + spacing
-            end
-
-            -- Type chips
-            for _, chip in ipairs(instance.typeChips) do
-                chip:ClearAllPoints()
-                chip:SetPoint("LEFT", instance.chipStrip, "LEFT", xOffset, 0)
-                chip:Show()
-                xOffset = xOffset + chip:GetWidth() + spacing
-            end
-
-            -- Separator 2
-            if instance.chipSep2 then
-                instance.chipSep2:ClearAllPoints()
-                xOffset = xOffset + 2
-                instance.chipSep2:SetPoint("LEFT", instance.chipStrip, "LEFT", xOffset, 0)
-                instance.chipSep2:Show()
-                xOffset = xOffset + 1 + spacing
-            end
-
-            -- Special chips
-            for _, chip in ipairs(instance.specialChips) do
-                chip:ClearAllPoints()
-                chip:SetPoint("LEFT", instance.chipStrip, "LEFT", xOffset, 0)
-                chip:Show()
-                xOffset = xOffset + chip:GetWidth() + spacing
-            end
-
-            if instance.chipClearButton then
-                instance.chipClearButton:ClearAllPoints()
-                instance.chipClearButton:SetPoint("RIGHT", instance.chipStrip, "RIGHT", -4, 0)
-            end
-
-            -- Let UpdateChipLayout handle dropdown collapse if still too wide
-            UpdateChipLayout(instance)
-        else
-            -- >= 260: full size dots, normal layout
-            instance.chipStrip:SetHeight(Constants.FRAME.CHIP_STRIP_HEIGHT)
-
-            local xOffset = 4
-            for _, dot in ipairs(instance.qualityDots) do
-                dot:SetSize(chipSize, chipSize)
-                if dot.dot then dot.dot:SetSize(chipSize - 4, chipSize - 4) end
-                dot:ClearAllPoints()
-                dot:SetPoint("LEFT", instance.chipStrip, "LEFT", xOffset, 0)
-                xOffset = xOffset + chipSize + spacing
-            end
-
-            if instance.chipSep1 then
-                instance.chipSep1:ClearAllPoints()
-                xOffset = xOffset + 2
-                instance.chipSep1:SetPoint("LEFT", instance.chipStrip, "LEFT", xOffset, 0)
-                instance.chipSep1:Show()
-                xOffset = xOffset + 1 + spacing
-            end
-
-            for _, chip in ipairs(instance.typeChips) do
-                chip:ClearAllPoints()
-                chip:SetPoint("LEFT", instance.chipStrip, "LEFT", xOffset, 0)
-                chip:Show()
-                xOffset = xOffset + chip:GetWidth() + spacing
-            end
-
-            if instance.chipSep2 then
-                instance.chipSep2:ClearAllPoints()
-                xOffset = xOffset + 2
-                instance.chipSep2:SetPoint("LEFT", instance.chipStrip, "LEFT", xOffset, 0)
-                instance.chipSep2:Show()
-                xOffset = xOffset + 1 + spacing
-            end
-
-            for _, chip in ipairs(instance.specialChips) do
-                chip:ClearAllPoints()
-                chip:SetPoint("LEFT", instance.chipStrip, "LEFT", xOffset, 0)
-                chip:Show()
-                xOffset = xOffset + chip:GetWidth() + spacing
-            end
-
-            if instance.chipClearButton then
-                instance.chipClearButton:ClearAllPoints()
-                instance.chipClearButton:SetPoint("RIGHT", instance.chipStrip, "RIGHT", -4, 0)
-            end
-
-            UpdateChipLayout(instance)
-        end
-    end
+    LayoutChipStrip(instance)
 end
 
 -- Check if an item matches all active filters (chips + text operators)
@@ -1643,17 +2062,16 @@ function SearchBar:ItemMatchesFilters(parent, itemData)
 
     -- 2) Type chips: OR within group
     if next(state.types) then
-        local itemType = itemData.itemType
+        -- state.types is keyed by chip key (always English), so there is no
+        -- itemType string fallback here: on a non-English client the localized
+        -- itemType could never match those keys anyway.
         local matched = false
-        if itemType then
-            if state.types[itemType] then
-                matched = true
-            end
-            -- "Junk" chip matches quality 0 items
-            if not matched and state.types["Junk"] and (itemData.quality or -1) == 0 then
-                matched = true
-            end
-        elseif state.types["Junk"] and (itemData.quality or -1) == 0 then
+        local chipKey = itemData.classID and CHIP_KEY_BY_CLASS[itemData.classID]
+        if chipKey and state.types[chipKey] then
+            matched = true
+        end
+        -- "Junk" chip matches quality 0 items
+        if not matched and state.types["Junk"] and (itemData.quality or -1) == 0 then
             matched = true
         end
         if not matched then return false end

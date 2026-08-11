@@ -146,7 +146,9 @@ local function UpdateFrameAppearance(skipButtonRestyle)
     GuildBankHeader:SetBackdropAlpha(bgAlpha)
 
     local showSearchBar = GuildBankFrame:IsSearchBarVisible()
-    local showFilterChips = Database:GetSetting("showFilterChips")
+    -- Ask SearchBar, not the raw setting: it also accounts for the user having hidden
+    -- every individual chip, which collapses the strip just like switching it off.
+    local showFilterChips = SearchBar:AreChipsVisible()
     local showFooter = Database:GetSetting("showFooter")
 
     -- Update search bar visibility (use SearchBar module API to handle filter chips)
@@ -1300,7 +1302,7 @@ function GuildBankFrame:Refresh()
 
     -- Calculate frame dimensions
     local showSearchBar = GuildBankFrame:IsSearchBarVisible()
-    local showFilterChips = Database:GetSetting("showFilterChips")
+    local showFilterChips = SearchBar:AreChipsVisible()
     local showFooter = Database:GetSetting("showFooter")
     local chipHeight = (showSearchBar and showFilterChips) and (Constants.FRAME.CHIP_STRIP_HEIGHT + 1) or 0
     local topOffset = showSearchBar
@@ -1834,7 +1836,7 @@ local function OnSettingChanged(event, key, value)
         -- Column/size changes need full refresh
         UpdateFrameAppearance(true)  -- Refresh below restyles buttons
         GuildBankFrame:Refresh()
-    elseif key == "showFooter" or key == "showSearchBar" or key == "showFilterChips" then
+    elseif key == "showFooter" or key == "showSearchBar" or key == "showFilterChips" or key == "hiddenChips" then
         UpdateFrameAppearance(true)  -- Refresh below restyles buttons
         GuildBankFrame:Refresh()
     end

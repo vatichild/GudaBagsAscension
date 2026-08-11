@@ -85,6 +85,7 @@ UI\Controls\Slider.lua
 UI\Controls\Checkbox.lua
 UI\Controls\ToggleButton.lua
 UI\Controls\Select.lua
+UI\Controls\ChipToggleList.lua
 
 # UI Components (Reusable)
 UI\Components\DragDropManager.lua

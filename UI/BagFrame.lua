@@ -691,7 +691,9 @@ function BagFrame:Refresh()
     local showFooter = showFooterSetting or isViewingCached
     local showCategoryCount = Database:GetSetting("showCategoryCount")
 
-    local showFilterChips = Database:GetSetting("showFilterChips")
+    -- Ask SearchBar, not the raw setting: it also accounts for the user having hidden
+    -- every individual chip, which collapses the strip just like switching it off.
+    local showFilterChips = SearchBar:AreChipsVisible()
 
     local splitColumns = Database:GetSetting("splitBagColumns") or 2
 
@@ -2315,6 +2317,7 @@ local resizeSettings = {
     showFooter = true,
     showSearchBar = true,
     showFilterChips = true,
+    hiddenChips = true,  -- hiding the last chip collapses the strip, changing frame height
 }
 
 -- Debounce state for QuestBar toggle

@@ -148,6 +148,11 @@ end
 -------------------------------------------------
 function SettingsSchema.GetFeatures()
     local L = ns.L
+    -- The per-chip picker is meaningless while the strip itself is off.
+    local chipsOff = function()
+        local Database = ns:GetModule("Database")
+        return not (Database and Database:GetSetting("showFilterChips"))
+    end
     return {
         { type = "separator", label = L["SETTINGS_SECTION_HEADER_BUTTONS"] },
         { type = "row", children = {
@@ -177,6 +182,10 @@ function SettingsSchema.GetFeatures()
             { type = "checkbox", key = "showFooter", label = L["SETTINGS_SHOW_FOOTER"], tooltip = L["SETTINGS_SHOW_FOOTER_TIP"] },
             { type = "checkbox", key = "showDragFlyout", label = L["SETTINGS_SHOW_DRAG_FLYOUT"], tooltip = L["SETTINGS_SHOW_DRAG_FLYOUT_TIP"] },
         }},
+
+        { type = "separator", label = L["SETTINGS_SECTION_FILTER_CHIPS"], hidden = chipsOff },
+        { type = "description", text = L["SETTINGS_CHIP_VISIBILITY_TIP"], height = 16, hidden = chipsOff },
+        { type = "chiptoggles", hidden = chipsOff },
     }
 end
 

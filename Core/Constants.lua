@@ -265,6 +265,10 @@ Constants.DEFAULTS = {
     showBorders = true,
     showSearchBar = true,
     showFilterChips = false,
+    -- Chips the user hid from the filter strip, keyed "q:<0-7>" / "t:<typeKey>" /
+    -- "s:<specialKey>". Absent = visible, so chips added in a later version ship
+    -- enabled without needing a settings migration.
+    hiddenChips = {},
     showQuestBar = true,
     hideQuestBarInBGs = true,
     hoverBagline = false,

@@ -1870,7 +1870,9 @@ function BankFrame:Refresh()
     end
 
     local showSearchBar = BankFrame:IsSearchBarVisible()
-    local showFilterChips = Database:GetSetting("showFilterChips")
+    -- Ask SearchBar, not the raw setting: it also accounts for the user having hidden
+    -- every individual chip, which collapses the strip just like switching it off.
+    local showFilterChips = SearchBar:AreChipsVisible()
     local showFooterSetting = Database:GetSetting("showFooter")
     local showFooter = showFooterSetting or isViewingCached or not isBankOpen
     local showCategoryCount = Database:GetSetting("showCategoryCount")
@@ -3518,6 +3520,7 @@ local resizeSettings = {
     showFooter = true,
     showSearchBar = true,
     showFilterChips = true,
+    hiddenChips = true,  -- hiding the last chip collapses the strip, changing frame height
 }
 
 local function OnSettingChanged(event, key, value)
