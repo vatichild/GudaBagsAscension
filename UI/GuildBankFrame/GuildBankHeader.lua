@@ -18,6 +18,10 @@ local CreateFrame = ns.CreateFrame or CreateFrame
 local frame = nil
 local onDragStop = nil
 
+-- Matches UI\Header.lua's guard on the bag sort button.
+local SORT_DEBOUNCE = 1.0
+local lastSortTime = 0
+
 local function CreateHeader(parent)
     local titleBar = CreateFrame("Frame", "GudaGuildBankHeader", parent, "BackdropTemplate")
     titleBar:SetHeight(Constants.FRAME.TITLE_HEIGHT)
@@ -111,6 +115,32 @@ local function CreateHeader(parent)
     titleBar.settingsButton = settingsButton
     lastRightButton = settingsButton
 
+    -- Sort button. Personal Bank only -- GuildBankFrame's chrome pass shows and
+    -- hides it, so a real guild bank never gets one (each move there is a
+    -- withdraw against a per-rank allowance; see Sorting\GuildBankSort.lua).
+    if Constants.FEATURES.SORT then
+        local sortButton = IconButton:Create(titleBar, "sort", {
+            tooltip = L["TOOLTIP_SORT_PERSONAL_BANK"],
+            onClick = function()
+                if InCombatLockdown() then return end
+                -- Same debounce as the bag header's sort button: a double click
+                -- must not start a second pass over a layout that is moving.
+                local now = GetTime()
+                if now - lastSortTime < SORT_DEBOUNCE then return end
+                lastSortTime = now
+
+                local GuildBankSort = ns:GetModule("GuildBankSort")
+                if GuildBankSort then
+                    GuildBankSort:SortPersonalBank()
+                end
+            end,
+        })
+        sortButton:SetPoint("RIGHT", lastRightButton, "LEFT", -4, 0)
+        sortButton:Hide()   -- shown by ApplyBankModeChrome when personal
+        titleBar.sortButton = sortButton
+        lastRightButton = sortButton
+    end
+
     -- Search toggle button (shown when "Always Show Search Bar" is off)
     local searchButton = SearchToggleButton:Create(titleBar, {
         targetModule = "GuildBankFrame",
@@ -187,6 +217,24 @@ function GuildBankHeader:SetGuildName(guildName)
     else
         frame.title:SetText(L["TITLE_GUILD_BANK"] or "Guild Bank")
     end
+end
+
+--- Show or hide the sort button. Called from GuildBankFrame's chrome pass, which
+--- also runs when the bank kind resolves late -- so a session that starts out
+--- looking like a guild bank picks the button up as soon as it is identified.
+function GuildBankHeader:SetSortShown(shown)
+    if not frame or not frame.sortButton then return end
+    if shown then frame.sortButton:Show() else frame.sortButton:Hide() end
+end
+
+--- Greyed out while a sort runs, so a second click cannot start another pass.
+function GuildBankHeader:SetSortEnabled(enabled)
+    if not frame or not frame.sortButton then return end
+    local Utils = ns:GetModule("Utils")
+    if Utils then
+        Utils:SetEnabled(frame.sortButton, enabled)
+    end
+    frame.sortButton:SetAlpha(enabled and 1 or 0.4)
 end
 
 --- Ascension's Personal Bank shares this window, so the title is what tells the

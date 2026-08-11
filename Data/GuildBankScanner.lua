@@ -31,6 +31,11 @@ local currentGuildName = nil
 local isQueryingTabs = false
 local queryStartTime = 0
 
+-- Set while Sorting\GuildBankSort.lua is moving items. The move events are its
+-- clock, so the data handlers below stand down for the duration rather than
+-- re-querying and re-rendering after every single swap.
+local sortInProgress = false
+
 -- Dirty tracking for incremental updates
 local dirtyTabs = {}
 local pendingUpdate = false
@@ -88,6 +93,16 @@ end
 
 function GuildBankScanner:GetNumTabs()
     return GetNumGuildBankTabs() or 0
+end
+
+--- Sorting\GuildBankSort.lua flags its runs here so the data handlers ignore the
+--- move traffic they would otherwise treat as "someone changed the bank".
+function GuildBankScanner:SetSortInProgress(active)
+    sortInProgress = active and true or false
+end
+
+function GuildBankScanner:IsSortInProgress()
+    return sortInProgress
 end
 
 function GuildBankScanner:GetTabInfo(tabIndex)
@@ -151,6 +166,22 @@ end
 
 function GuildBankScanner:SetSelectedTab(tabIndex)
     selectedTabIndex = tabIndex or 0
+
+    -- Tell the CLIENT which tab we are showing, not just ourselves.
+    --
+    -- The server tracks a current guild bank tab, and Blizzard's own UI sets it
+    -- whenever a tab is selected -- but we replace that UI (and now stop it
+    -- loading at all), and the only SetCurrentGuildBankTab call left in the addon
+    -- is on the side tabs' right-click menu. The Personal Bank hides those tabs
+    -- entirely, so nothing was setting it there. Bagnon addresses every guild
+    -- bank operation with GetCurrentGuildBankTab(), which is why its moves work.
+    if selectedTabIndex > 0 and isGuildBankOpen and SetCurrentGuildBankTab then
+        local _, _, isViewable = GetGuildBankTabInfo(selectedTabIndex)
+        if isViewable then
+            SetCurrentGuildBankTab(selectedTabIndex)
+        end
+    end
+
     -- Fire callback for UI refresh
     if ns.OnGuildBankTabChanged then
         ns.OnGuildBankTabChanged(selectedTabIndex)
@@ -666,6 +697,20 @@ local function HandleGuildBankOpened()
     -- announced from GUILDBANK_UPDATE_TABS below, once the server sends the tabs.
     ResolveBankKind()
 
+    -- Make sure the client has an active tab for this session. Blizzard's UI did
+    -- this as part of showing itself; with that UI gone, an unset current tab
+    -- leaves item moves addressing a tab the server does not consider active.
+    if GuildBankScanner:GetNumTabs() > 0 and SetCurrentGuildBankTab then
+        local current = GetCurrentGuildBankTab and GetCurrentGuildBankTab() or 0
+        if not current or current < 1 then
+            local _, _, isViewable = GetGuildBankTabInfo(1)
+            if isViewable then
+                ns:Debug("Setting current guild bank tab to 1 (was", tostring(current), ")")
+                SetCurrentGuildBankTab(1)
+            end
+        end
+    end
+
     ns:Debug("  numTabs =", GuildBankScanner:GetNumTabs())
 
     -- Initial scan. ScanAllTabs queries first and then scans, so the separate
@@ -716,6 +761,21 @@ end, GuildBankScanner)
 -- the window is open; ResolveBankKind latches the first real answer.
 Events:Register("GUILDBANK_UPDATE_TABS", function()
     ResolveBankKind()
+
+    -- Tabs are only known here, not at GUILDBANKFRAME_OPENED -- the server sends
+    -- them afterwards. The current-tab set at open therefore runs with zero tabs
+    -- and does nothing, so repeat it now that there is a tab to select.
+    if isGuildBankOpen and SetCurrentGuildBankTab and GuildBankScanner:GetNumTabs() > 0 then
+        local current = GetCurrentGuildBankTab and GetCurrentGuildBankTab() or 0
+        if not current or current < 1 then
+            local _, _, isViewable = GetGuildBankTabInfo(1)
+            if isViewable then
+                ns:Debug("Setting current guild bank tab to 1 from UPDATE_TABS (was",
+                    tostring(current), ")")
+                SetCurrentGuildBankTab(1)
+            end
+        end
+    end
 end, GuildBankScanner)
 
 -- TBC/Classic fallback: Hook into Blizzard's GuildBankFrame when it loads
@@ -791,6 +851,9 @@ local scanTimer = nil
 
 Events:Register("GUILDBANKBAGSLOTS_CHANGED", function()
     if not isGuildBankOpen then return end
+    -- Same reasoning as the lock handler: a sort generates this event per move
+    -- and drives its own refresh when it finishes.
+    if sortInProgress then return end
 
     -- Backstop for the announcement: if a session ever arrives without a
     -- GUILDBANK_UPDATE_TABS, the tab identity is still readable by the time slot
@@ -861,6 +924,17 @@ end, GuildBankScanner)
 -- Item lock changed (item picked up or placed down)
 Events:Register("GUILDBANK_ITEM_LOCK_CHANGED", function(event, tabIndex, slotIndex)
     if not isGuildBankOpen then return end
+
+    -- A sort in progress owns this event: it fires twice per swap, and the
+    -- query + rescan + refresh below would run per move (~50 times for a full
+    -- tab). The sorter steps on it instead and does one refresh at the end.
+    if sortInProgress then
+        local GuildBankSort = ns:GetModule("GuildBankSort")
+        if GuildBankSort and GuildBankSort.OnLockChanged then
+            GuildBankSort:OnLockChanged()
+        end
+        return
+    end
 
     ns:Debug("GUILDBANK_ITEM_LOCK_CHANGED fired, tab:", tabIndex, "slot:", slotIndex)
 

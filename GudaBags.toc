@@ -79,6 +79,9 @@ Data\CurrencyScanner.lua
 
 # Sorting
 Sorting\SortEngine.lua
+# Guild-bank-backed slots (Ascension Personal Bank) -- separate mover, the bag
+# sort engine addresses containers by bagID and cannot reach tab/slot items.
+Sorting\GuildBankSort.lua
 
 # UI Controls
 UI\Controls\Slider.lua

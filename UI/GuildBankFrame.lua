@@ -80,6 +80,11 @@ local function ApplyBankModeChrome()
     if GuildBankHeader and GuildBankHeader.UpdateTitle then
         GuildBankHeader:UpdateTitle()
     end
+    -- Sorting is Personal Bank only (Sorting\GuildBankSort.lua explains why), so
+    -- the button lives and dies with the personal chrome.
+    if GuildBankHeader and GuildBankHeader.SetSortShown then
+        GuildBankHeader:SetSortShown(personal)
+    end
 end
 local function ComputeGuildBankRenderSig()
     local selectedTab = (GuildBankScanner and GuildBankScanner:GetSelectedTab()) or 0

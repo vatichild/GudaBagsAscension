@@ -713,14 +713,39 @@ local function CreateButton(parent)
     -- Enable drag for all items including guild bank
     button:RegisterForDrag("LeftButton")
 
-    -- Handle drag start for guild bank items (hook to preserve template behavior for regular items)
-    button:HookScript("OnDragStart", function(self)
-        if self.itemData and self.itemData.isGuildBank and not self.isReadOnly then
-            local tabIndex = self.itemData.bagID
-            local slotIndex = self.itemData.slot
-            if self.itemData.itemID then  -- Only drag if there's an item
-                PickupGuildBankItem(tabIndex, slotIndex)
+    -- Handle drag start for guild bank items.
+    --
+    -- SetScript, not HookScript: a hook runs AFTER the container template's own
+    -- OnDragStart, which calls PickupContainerItem with this button's IDs. Those
+    -- are zeroed for guild bank slots, so it issues PickupContainerItem(0, 0)
+    -- against the cursor immediately before our PickupGuildBankItem. Bagnon
+    -- builds its guild slots on the plain ItemButtonTemplate and owns the script
+    -- outright, so nothing touches the cursor first -- match that. Regular bag
+    -- slots still reach the template handler through the dispatch below.
+    local originalDragStart = button:GetScript("OnDragStart")
+    button:SetScript("OnDragStart", function(self, ...)
+        if not (self.itemData and self.itemData.isGuildBank and not self.isReadOnly) then
+            if originalDragStart then originalDragStart(self, ...) end
+            return
+        end
+
+        local tabIndex = self.itemData.bagID
+        local slotIndex = self.itemData.slot
+        if self.itemData.itemID then  -- Only drag if there's an item
+            local curTab = GetCurrentGuildBankTab and GetCurrentGuildBankTab()
+            local tex, count, locked = nil, nil, nil
+            if GetGuildBankItemInfo then
+                tex, count, locked = GetGuildBankItemInfo(tabIndex, slotIndex)
             end
+            PickupGuildBankItem(tabIndex, slotIndex)
+            ns:Debug("gb drag pickup tab", tabIndex, "slot", slotIndex,
+                "cursor", CursorHasItem() and "held" or "EMPTY",
+                "| currentTab", tostring(curTab),
+                "serverTex", tostring(tex), "count", tostring(count),
+                "locked", tostring(locked),
+                "link", tostring(GetGuildBankItemLink and GetGuildBankItemLink(tabIndex, slotIndex)))
+        else
+            ns:Debug("gb drag skipped: slot has no itemID")
         end
     end)
 
@@ -1698,12 +1723,17 @@ local function CreateButton(parent)
     button:SetScript("OnReceiveDrag", function(self)
         -- Handle guild bank items (works on both Classic and Retail)
         if self.itemData and self.itemData.isGuildBank and not self.isReadOnly then
-            local cursorType = GetCursorInfo()
-            if cursorType == "item" then
-                local tabIndex = self.itemData.bagID
-                local slotIndex = self.itemData.slot
-                PickupGuildBankItem(tabIndex, slotIndex)
-            end
+            -- No cursor gate: OnReceiveDrag only fires with something on the
+            -- cursor, and PickupGuildBankItem is itself the place-or-pickup call.
+            -- Bagnon's guild slots do exactly this, and gating on GetCursorInfo()
+            -- reporting "item" is what a dropped guild-bank item can fail.
+            local tabIndex = self.itemData.bagID
+            local slotIndex = self.itemData.slot
+            local cursorType = GetCursorInfo and GetCursorInfo()
+            PickupGuildBankItem(tabIndex, slotIndex)
+            ns:Debug("gb drop tab", tabIndex, "slot", slotIndex,
+                "cursorType", tostring(cursorType),
+                "after", CursorHasItem() and "STILL HELD" or "placed")
             return
         end
 
@@ -2094,8 +2124,20 @@ function ItemButton:SetItem(button, itemData, size, isReadOnly)
 
         -- Set real bagID/slot so template's click handler places items correctly
         -- itemData now contains real bagID/slot of first empty slot
-        button.wrapper:SetID(itemData.bagID)
-        button:SetID(itemData.slot)
+        --
+        -- EXCEPT for guild-bank-backed slots (Ascension's Personal Bank in
+        -- category view): there bagID is a TAB index, and tab 1 is also the
+        -- player's first bag -- so handing it to the container template pointed
+        -- its secure click handler at the wrong container entirely. Those tiles
+        -- are driven by our own guild bank handlers, which read itemData rather
+        -- than the widget IDs, so zero them like every other guild bank button.
+        if itemData.isGuildBank then
+            button.wrapper:SetID(0)
+            button:SetID(0)
+        else
+            button.wrapper:SetID(itemData.bagID)
+            button:SetID(itemData.slot)
+        end
 
         -- Refresh tooltip in place if user is hovering this pseudo-slot
         -- (e.g. another bag-update changed the empty count).
