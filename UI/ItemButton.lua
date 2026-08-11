@@ -1203,18 +1203,37 @@ local function CreateButton(parent)
                         catName = catDef and catDef.name or self.categoryId
                     end
                 end
-                ns:Print(format("|cff00ff00[DebugItem]|r %s | ID: %s | Bag: %s Slot: %s | Count: %s | Quality: %s | Category: %s | Type: %s - %s | Quest: %s | Duration: %s",
+                ns:Print(format("|cff00ff00[DebugItem]|r %s | ID: %s | Bag: %s Slot: %s | Count: %s | Category: %s | Quest: %s | Duration: %s",
                     d.link or "?",
                     tostring(d.itemID or "?"),
                     tostring(d.bagID or "?"),
                     tostring(d.slot or "?"),
                     tostring(d.count or 1),
-                    tostring(d.quality or "?"),
                     tostring(catName),
-                    tostring(d.itemType or "?"),
-                    tostring(d.itemSubType or "?"),
                     tostring(d.isQuestItem or false),
                     tostring(d.hasDuration or false)
+                ))
+
+                -- Second line mirrors the category-view comparator
+                -- (LayoutEngine CategorySortComparator) field for field, so a
+                -- surprising order can be read straight off two hovers. Items
+                -- only sort against others in the SAME category, so compare the
+                -- Category above before reading anything into these keys.
+                local Database = ns:GetModule("Database")
+                -- categoryPriority is what orders this view; sortPriority is
+                -- shown alongside it only so the two are never confused.
+                local catPriority = Database and Database:GetSetting("categoryPriority") or "?"
+                local bagPriority = Database and Database:GetSetting("sortPriority") or "?"
+                ns:Print(format("|cff00ff00[DebugSort]|r CategoryPriority: |cffffff00%s|r (bag sortPriority: %s) | class: %s sub: %s | quality: %s | iLvl: %s | Type: %s - %s | grouped: %s",
+                    tostring(catPriority),
+                    tostring(bagPriority),
+                    tostring(d.classID or "nil"),
+                    tostring(d.subClassID or "nil"),
+                    tostring(d.quality or "nil"),
+                    tostring(d.itemLevel or "nil"),
+                    tostring(d.itemType or "?"),
+                    tostring(d.itemSubType or "?"),
+                    tostring(d.isGroupedStack or false)
                 ))
             end
 

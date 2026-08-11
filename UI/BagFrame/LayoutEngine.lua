@@ -880,6 +880,14 @@ function LayoutEngine:BuildCategorySections(items, isViewingCached, emptyCount, 
                             name = firstItem.itemData.name,
                             itemType = firstItem.itemData.itemType,
                             itemSubType = firstItem.itemData.itemSubType,
+                            -- Class ids and item level are all constant per
+                            -- itemID, so the first item's values describe the
+                            -- whole group. Carried because the category sort
+                            -- reads them off itemData; without them a grouped
+                            -- stack would sort as Miscellaneous at ilvl 0.
+                            classID = firstItem.itemData.classID,
+                            subClassID = firstItem.itemData.subClassID,
+                            itemLevel = firstItem.itemData.itemLevel,
                             isGroupedStack = true,
                             groupedLocations = locations,
                         },
@@ -970,122 +978,127 @@ function LayoutEngine:BuildCategorySections(items, isViewingCached, emptyCount, 
     return nonEmptySections
 end
 
--- Sort key cache for category view (avoid repeated GetItemInfo calls)
-local categorySortKeyCache = {}
+-- Set by SortCategoryItems immediately before each table.sort. Module-level so
+-- the sort does not allocate a fresh closure for every section on every pass.
+--
+-- Driven by the "categoryPriority" setting, which is the category VIEW's own
+-- ordering. The similarly named "sortPriority" belongs to Sorting\SortEngine
+-- and decides where items physically end up in the bags; the two were one
+-- setting until they were split, so do not re-merge them.
+local currentCategoryPriority = "default"
+local currentIsMergedGroup = false
 
-local function GetCategorySortKey(itemData)
-    local itemID = itemData.itemID
-    if not itemID then return nil end
-
-    -- Check cache first
-    if categorySortKeyCache[itemID] then
-        return categorySortKeyCache[itemID]
+-- classID, subClassID, itemLevel and quality are all already on itemData
+-- (ItemScanner:ScanSlot -- which on 3.3.5a rebuilds the class ids through
+-- ns.Compat.ResolveItemClassIDs, since GetItemInfo stops at sellPrice here),
+-- including for cached characters, whose slot tables come back out of
+-- SavedVariables intact. Reading them here instead of calling GetItemInfo also
+-- lets them self-heal: GET_ITEM_INFO_RECEIVED re-runs the scan and writes fresh
+-- data back, where a sort-key cache keyed by itemID would keep serving the
+-- placeholder classID for the rest of the session.
+local function CategorySortComparator(a, b)
+    -- For merged groups, sort by category order first
+    if currentIsMergedGroup then
+        local aOrder = a.categoryOrderIndex or 999
+        local bOrder = b.categoryOrderIndex or 999
+        if aOrder ~= bOrder then
+            return aOrder < bOrder
+        end
     end
 
-    -- Fetch classID, subClassID, and itemLevel from GetItemInfo
-    local _, _, _, itemLevel, _, itemType, itemSubType, _, _, _, _, classID, subClassID = GetItemInfo(itemID)
-    -- 3.3.5a's GetItemInfo stops at position 11; rebuild the class ids so the
-    -- category-view sort comparator doesn't see Miscellaneous for everything.
-    if classID == nil and ns.Compat then
-        classID, subClassID = ns.Compat.ResolveItemClassIDs(itemType, itemSubType, itemID)
+    local aData = a.itemData
+    local bData = b.itemData
+
+    -- Pseudo slots (Empty/Soul/Quiver/DropTarget) carry no itemID and no class.
+    -- They have always skipped the class/subclass comparison, so keeping that
+    -- guard leaves their position within the section unchanged.
+    local bothTyped = aData.itemID ~= nil and bData.itemID ~= nil
+
+    local aQuality = aData.quality or 0
+    local bQuality = bData.quality or 0
+    local aLevel = aData.itemLevel or 0
+    local bLevel = bData.itemLevel or 0
+    local aClass = aData.classID or 15  -- Default to Miscellaneous
+    local bClass = bData.classID or 15
+    local aSub = aData.subClassID or 0
+    local bSub = bData.subClassID or 0
+
+    if currentCategoryPriority == "type" then
+        -- Type first, quality second, so an epic and a rare gem of the same cut
+        -- stay adjacent instead of being split across separate quality blocks.
+        if bothTyped then
+            if aClass ~= bClass then return aClass < bClass end
+            if aSub ~= bSub then return aSub < bSub end
+        end
+        if aQuality ~= bQuality then return aQuality > bQuality end
+        if aLevel ~= bLevel then return aLevel > bLevel end
+    elseif currentCategoryPriority == "ilvl" then
+        -- Item level first (higher first)
+        if aLevel ~= bLevel then return aLevel > bLevel end
+        if aQuality ~= bQuality then return aQuality > bQuality end
+    elseif currentCategoryPriority == "quality" then
+        -- Quality first (higher first), then item level
+        if aQuality ~= bQuality then return aQuality > bQuality end
+        if aLevel ~= bLevel then return aLevel > bLevel end
+    else
+        -- Default: quality first, then class/subclass, then ilvl
+        if aQuality ~= bQuality then return aQuality > bQuality end
     end
 
-    local sortKey = {
-        classID = classID or 15,  -- Default to Miscellaneous
-        subClassID = subClassID or 0,
-        itemLevel = itemLevel or 0,
-    }
+    -- "type" already applied class/subclass above, where they decide the order
+    -- outright; reaching here in that mode means both are equal.
+    if bothTyped and currentCategoryPriority ~= "type" then
+        if aClass ~= bClass then
+            return aClass < bClass
+        end
+        if aSub ~= bSub then
+            return aSub < bSub
+        end
+        if currentCategoryPriority == "default" then
+            if aLevel ~= bLevel then return aLevel > bLevel end
+        end
+    end
 
-    categorySortKeyCache[itemID] = sortKey
-    return sortKey
-end
+    -- Item type (fallback for items without classID)
+    local aType = aData.itemType or ""
+    local bType = bData.itemType or ""
+    if aType ~= bType then
+        return aType < bType
+    end
 
--- Clear sort key cache (call on login or when needed)
-function LayoutEngine:ClearSortKeyCache()
-    wipe(categorySortKeyCache)
+    -- Item subtype
+    local aSubType = aData.itemSubType or ""
+    local bSubType = bData.itemSubType or ""
+    if aSubType ~= bSubType then
+        return aSubType < bSubType
+    end
+
+    -- Item ID
+    local aID = aData.itemID or 0
+    local bID = bData.itemID or 0
+    if aID ~= bID then
+        return aID < bID
+    end
+
+    -- Name
+    local aName = aData.name or ""
+    local bName = bData.name or ""
+    if aName ~= bName then
+        return aName < bName
+    end
+
+    -- Stack count (higher stacks first)
+    return (aData.count or 1) > (bData.count or 1)
 end
 
 -- Sort items within a category section
 -- For merged groups, items are sorted by category order first to maintain category grouping
 function LayoutEngine:SortCategoryItems(items, isMergedGroup)
     local Database = ns:GetModule("Database")
-    local sortPriority = Database:GetSetting("sortPriority") or "default"
+    currentCategoryPriority = Database:GetSetting("categoryPriority") or "default"
+    currentIsMergedGroup = isMergedGroup and true or false
 
-    table.sort(items, function(a, b)
-        -- For merged groups, sort by category order first
-        if isMergedGroup then
-            local aOrder = a.categoryOrderIndex or 999
-            local bOrder = b.categoryOrderIndex or 999
-            if aOrder ~= bOrder then
-                return aOrder < bOrder
-            end
-        end
-
-        local aData = a.itemData
-        local bData = b.itemData
-        local aQuality = aData.quality or 0
-        local bQuality = bData.quality or 0
-        local aKey = GetCategorySortKey(aData)
-        local bKey = GetCategorySortKey(bData)
-        local aLevel = aKey and aKey.itemLevel or 0
-        local bLevel = bKey and bKey.itemLevel or 0
-
-        if sortPriority == "ilvl" then
-            -- Item level first (higher first)
-            if aLevel ~= bLevel then return aLevel > bLevel end
-            if aQuality ~= bQuality then return aQuality > bQuality end
-        elseif sortPriority == "quality" then
-            -- Quality first (higher first), then item level
-            if aQuality ~= bQuality then return aQuality > bQuality end
-            if aLevel ~= bLevel then return aLevel > bLevel end
-        else
-            -- Default: quality first, then class/subclass, then ilvl
-            if aQuality ~= bQuality then return aQuality > bQuality end
-        end
-
-        if aKey and bKey then
-            if aKey.classID ~= bKey.classID then
-                return aKey.classID < bKey.classID
-            end
-            if aKey.subClassID ~= bKey.subClassID then
-                return aKey.subClassID < bKey.subClassID
-            end
-            if sortPriority == "default" then
-                if aLevel ~= bLevel then return aLevel > bLevel end
-            end
-        end
-
-        -- Item type (fallback for items without classID)
-        local aType = aData.itemType or ""
-        local bType = bData.itemType or ""
-        if aType ~= bType then
-            return aType < bType
-        end
-
-        -- Item subtype
-        local aSubType = aData.itemSubType or ""
-        local bSubType = bData.itemSubType or ""
-        if aSubType ~= bSubType then
-            return aSubType < bSubType
-        end
-
-        -- Item ID
-        local aID = aData.itemID or 0
-        local bID = bData.itemID or 0
-        if aID ~= bID then
-            return aID < bID
-        end
-
-        -- Name
-        local aName = aData.name or ""
-        local bName = bData.name or ""
-        if aName ~= bName then
-            return aName < bName
-        end
-
-        -- Stack count (higher stacks first)
-        return (aData.count or 1) > (bData.count or 1)
-    end)
+    table.sort(items, CategorySortComparator)
 end
 
 -- Calculate gap between category blocks based on icon size

@@ -60,22 +60,34 @@ function SettingsSchema.GetGeneral()
                 { value = "default", label = L["SETTINGS_SORT_DEFAULT"] },
                 { value = "ilvl", label = L["SETTINGS_SORT_ILVL"] },
                 { value = "quality", label = L["SETTINGS_SORT_QUALITY"] },
+                -- Reuses the category editor's "Item Type" label rather than
+                -- translating the same word a second time in all 10 locales.
+                { value = "type", label = L["RULE_ITEM_TYPE"] },
             }},
+            -- Category view layout order. Same value set as sortPriority beside
+            -- it, but applied when the view is drawn rather than when the bags
+            -- are physically sorted.
+            { type = "select", key = "categoryPriority", label = L["SETTINGS_CAT_PRIORITY"], tooltip = L["SETTINGS_CAT_PRIORITY_TIP"], options = {
+                { value = "default", label = L["SETTINGS_SORT_DEFAULT"] },
+                { value = "ilvl", label = L["SETTINGS_SORT_ILVL"] },
+                { value = "quality", label = L["SETTINGS_SORT_QUALITY"] },
+                { value = "type", label = L["RULE_ITEM_TYPE"] },
+            }},
+        }},
+        { type = "row", children = {
             { type = "checkbox", key = "reverseStackSort", label = L["SETTINGS_REVERSE_STACK"], tooltip = L["SETTINGS_REVERSE_STACK_TIP"] },
-        }},
-        { type = "row", children = {
-            { type = "checkbox", key = "gudaSort", label = L["SETTINGS_GUDA_SORT"], tooltip = L["SETTINGS_GUDA_SORT_TIP"],
-              hidden = function() local Expansion = ns:GetModule("Expansion") return not (Expansion and Expansion.IsRetail) end },
-        }},
-        { type = "row", children = {
             { type = "checkbox", key = "sortRightToLeft", label = L["SETTINGS_SORT_RTL"], tooltip = L["SETTINGS_SORT_RTL_TIP"],
               hidden = function() local Expansion = ns:GetModule("Expansion")
                 if not (Expansion and Expansion.IsRetail) then return false end
                 return not ns:GetModule("Database"):GetSetting("gudaSort") end },
+        }},
+        { type = "row", children = {
             { type = "checkbox", key = "smoothSort", label = L["SETTINGS_SMOOTH_SORT"], tooltip = L["SETTINGS_SMOOTH_SORT_TIP"],
               hidden = function() local Expansion = ns:GetModule("Expansion")
                 if not (Expansion and Expansion.IsRetail) then return false end
                 return not ns:GetModule("Database"):GetSetting("gudaSort") end },
+            { type = "checkbox", key = "gudaSort", label = L["SETTINGS_GUDA_SORT"], tooltip = L["SETTINGS_GUDA_SORT_TIP"],
+              hidden = function() local Expansion = ns:GetModule("Expansion") return not (Expansion and Expansion.IsRetail) end },
         }},
 
         { type = "separator", label = L["SETTINGS_SECTION_AUTOMATION"] },

@@ -127,6 +127,18 @@ local function InitializeCharDB()
         end
         GudaBags_CharDB.settingsVersion = 6
     end
+
+    -- Migration: v7 - category view ordering split out of sortPriority into its
+    -- own categoryPriority setting. Seed it from the old value so an existing
+    -- player's category view keeps the order they already had; sortPriority now
+    -- only drives the physical bag sort. The defaults loop above has already
+    -- written the default, so this overwrite is what carries the old choice.
+    if (GudaBags_CharDB.settingsVersion or 0) < 7 then
+        if GudaBags_CharDB.settings.sortPriority ~= nil then
+            GudaBags_CharDB.settings.categoryPriority = GudaBags_CharDB.settings.sortPriority
+        end
+        GudaBags_CharDB.settingsVersion = 7
+    end
 end
 
 local function InitializeCharacterData()
