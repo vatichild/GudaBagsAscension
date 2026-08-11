@@ -11,6 +11,12 @@ local CreateFrame = ns.CreateFrame or CreateFrame
 local frame = nil
 local mainGuildBankFrame = nil
 
+-- Ascension Personal Bank mode: see GuildBankFooter:SetPersonalMode below.
+-- Declared up here because Init's UpdateLayout (a resize handler) has to honour
+-- it, and that closure is built before the setter is defined.
+local personalMode = false
+local PERSONAL_FOOTER_HEIGHT = 22
+
 local GuildBankScanner = nil
 local Money = nil
 local Database = nil
@@ -251,6 +257,9 @@ function GuildBankFooter:Init(parent)
 
     local function UpdateLayout()
         if not frame or not mainGuildBankFrame then return end
+        -- Personal mode owns the footer's geometry; a resize must not restore
+        -- the guild bank's two/three-row layout underneath it.
+        if personalMode then return end
         local width = mainGuildBankFrame:GetWidth()
         local newMode = width < 400 and "narrow" or "wide"
         if newMode == currentMode then return end
@@ -308,7 +317,56 @@ function GuildBankFooter:Init(parent)
     return frame
 end
 
+-------------------------------------------------
+-- Personal Bank mode
+-------------------------------------------------
+-- Ascension's Personal Bank has no money, no deposit/withdraw rights and no log,
+-- so every control here except the slot counter is meaningless for it. They are
+-- hidden rather than removed: the same footer serves both banks, and the guild
+-- session needs them back on the next open.
+
+function GuildBankFooter:SetPersonalMode(on)
+    on = on and true or false
+    personalMode = on
+    if not frame then return end
+
+    local guildOnly = {
+        frame.depositBtn, frame.withdrawBtn, frame.moneyText,
+        frame.moneyWithdrawInfo, frame.itemWithdrawInfo, frame.centerBtns,
+    }
+    for _, region in ipairs(guildOnly) do
+        if region then
+            if on then region:Hide() else region:Show() end
+        end
+    end
+
+    if on then
+        -- Single row: just the slot counter, anchored where the deposit button
+        -- would have been so it lines up with the grid's left edge.
+        frame:SetHeight(PERSONAL_FOOTER_HEIGHT)
+        frame.currentHeight = PERSONAL_FOOTER_HEIGHT
+        if frame.slotInfoFrame then
+            frame.slotInfoFrame:ClearAllPoints()
+            frame.slotInfoFrame:SetPoint("LEFT", frame, "LEFT", 0, 0)
+        end
+    else
+        frame:SetHeight(40)
+        frame.currentHeight = 40
+        if frame.slotInfoFrame and frame.withdrawBtn then
+            frame.slotInfoFrame:ClearAllPoints()
+            frame.slotInfoFrame:SetPoint("LEFT", frame.withdrawBtn, "RIGHT", 8, 0)
+        end
+    end
+end
+
+function GuildBankFooter:IsPersonalMode()
+    return personalMode
+end
+
 function GuildBankFooter:GetHeight()
+    if personalMode then
+        return PERSONAL_FOOTER_HEIGHT
+    end
     if frame and frame.currentHeight then
         return frame.currentHeight
     end
@@ -355,6 +413,9 @@ function GuildBankFooter:Update()
         frame.slotInfo:SetText("0/0")
     end
 
+    -- Personal bank has neither, and both would re-Show the hidden widgets.
+    if personalMode then return end
+
     -- Update guild money display
     self:UpdateMoney()
 
@@ -364,6 +425,9 @@ end
 
 function GuildBankFooter:UpdateButtonStates(isOpen)
     if not frame then return end
+    -- Every widget this touches is hidden in personal mode; showing them again
+    -- here is what would put a dead Deposit button under the Personal Bank.
+    if personalMode then return end
 
     if isOpen then
         -- Enable buttons

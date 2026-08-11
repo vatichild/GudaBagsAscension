@@ -63,6 +63,21 @@ end
 -- Tab Management
 -------------------------------------------------
 
+--- Slots in one tab, asked of the CLIENT rather than hardcoded.
+---
+--- Constants.GUILD_BANK_SLOTS_PER_TAB is stock 3.3.5a's 98 (14x7). A server that
+--- resizes its guild bank tabs also resizes the FrameXML constant its own guild
+--- bank UI lays out from, so reading that first is what keeps the slot counter
+--- honest here -- scanning 98 slots on a smaller tab counts the phantom ones as
+--- free, which is how "11/294" happens.
+function GuildBankScanner:GetSlotsPerTab()
+    local clientValue = _G.MAX_GUILDBANK_SLOTS_PER_TAB
+    if type(clientValue) == "number" and clientValue > 0 then
+        return clientValue
+    end
+    return Constants.GUILD_BANK_SLOTS_PER_TAB
+end
+
 function GuildBankScanner:GetNumTabs()
     return GetNumGuildBankTabs() or 0
 end
@@ -205,17 +220,18 @@ function GuildBankScanner:ScanTab(tabIndex)
         return nil
     end
 
+    local slotsPerTab = self:GetSlotsPerTab()
     local tabData = {
         tabIndex = tabIndex,
         name = tabInfo.name,
         icon = tabInfo.icon,
-        numSlots = Constants.GUILD_BANK_SLOTS_PER_TAB,
+        numSlots = slotsPerTab,
         freeSlots = 0,
         slots = {},
     }
 
     local itemCount = 0
-    for slot = 1, Constants.GUILD_BANK_SLOTS_PER_TAB do
+    for slot = 1, slotsPerTab do
         local itemData = self:ScanSlot(tabIndex, slot)
         if itemData then
             tabData.slots[slot] = itemData
@@ -305,20 +321,48 @@ end
 -- Database
 -------------------------------------------------
 
+--- Cache key for the Personal Bank: it belongs to the character, not the guild.
+--- Same "Name-Realm" shape Database uses for its per-character records.
+function GuildBankScanner:GetPersonalBankKey()
+    local name = UnitName("player")
+    if not name then return nil end
+    local realm = GetRealmName and GetRealmName() or ""
+    return realm ~= "" and (name .. "-" .. realm) or name
+end
+
 function GuildBankScanner:SaveToDatabase()
+    local tabCount = self:CountCachedTabs()
+    if tabCount == 0 then
+        ns:Debug("SaveToDatabase: No tabs to save, skipping")
+        return
+    end
+
+    -- The Personal Bank arrives over the guild bank API but is the character's
+    -- own. Saving it under the guild name overwrote the guild bank's cached
+    -- contents with personal ones on every visit.
+    if self:GetSessionKind() == "personal" then
+        local charKey = self:GetPersonalBankKey()
+        if not charKey then
+            ns:Debug("SaveToDatabase: Cannot save personal bank - no character name")
+            return
+        end
+        Database:SavePersonalBank(charKey, {
+            charKey = charKey,
+            tabs = cachedGuildBank,
+            tabInfo = cachedTabInfo,
+            lastUpdate = time(),
+        })
+        ns:Debug("Personal bank saved for:", charKey, "with", tabCount, "tabs")
+        return
+    end
+
     local guildName = self:GetCurrentGuildName()
     if not guildName then
         ns:Debug("GuildBankScanner: Cannot save - no guild name")
         return
     end
 
-    local tabCount = self:CountCachedTabs()
     ns:Debug("SaveToDatabase: guildName =", guildName, "cachedTabs =", tabCount)
-
-    if tabCount == 0 then
-        ns:Debug("SaveToDatabase: No tabs to save, skipping")
-        return
-    end
 
     local guildBankData = {
         guildName = guildName,
@@ -329,6 +373,34 @@ function GuildBankScanner:SaveToDatabase()
 
     Database:SaveGuildBank(guildName, guildBankData)
     ns:Debug("Guild bank saved for:", guildName, "with", tabCount, "tabs")
+end
+
+--- Load the cached Personal Bank into the same caches the frame renders from,
+--- so offline browsing needs no second render path.
+function GuildBankScanner:LoadPersonalFromDatabase()
+    local charKey = self:GetPersonalBankKey()
+    if not charKey then return false end
+
+    local tabs = Database:GetNormalizedPersonalBank(charKey)
+    if not tabs then
+        ns:Debug("No personal bank data stored for:", charKey)
+        return false
+    end
+
+    cachedGuildBank = tabs
+    cachedTabInfo = {}
+    local storedInfo = Database:GetPersonalBankTabInfo(charKey)
+    if storedInfo then
+        for tabKey, tabInfo in pairs(storedInfo) do
+            cachedTabInfo[tonumber(tabKey) or tabKey] = tabInfo
+        end
+    end
+
+    -- Tab 1, not the merged "All Tabs" view: the offline copy is presented the
+    -- same single-container way as a live personal session.
+    selectedTabIndex = 1
+    ns:Debug("Loaded cached personal bank for:", charKey, "tabs =", self:CountCachedTabs())
+    return true
 end
 
 function GuildBankScanner:LoadFromDatabase(guildName)
@@ -450,6 +522,87 @@ local function OnGuildBankUpdate(tabIndex)
 end
 
 -------------------------------------------------
+-- Guild Bank vs Ascension "Personal Bank"
+-------------------------------------------------
+-- Ascension's Personal Bank (item 110000 summons the "Personal Belongings"
+-- object 46) is the guild bank system reused server-side: it sends guild bank
+-- packets and fires GUILDBANKFRAME_OPENED exactly like a real guild bank, so the
+-- event cannot tell them apart. What differs is the tab identity the server
+-- sends with GUILDBANK_UPDATE_TABS -- which arrives AFTER the open, so the
+-- classification has to wait for it.
+--
+-- Neither the tab name nor its icon exists anywhere in Extensions.dll or
+-- Ascension.exe (checked), so both come over the wire and no client locale file
+-- can rewrite them: "Personal Bank" is what a deDE client receives too.
+--
+-- The icon is the primary test rather than the name because it is immune to a
+-- server-side rename AND to the player's guild rank. Permission-derived fields
+-- (canDeposit, numWithdrawals, withdraw limit, money) are deliberately NOT used
+-- to decide: a guild member with view-only rights on tab 1 has canDeposit = nil
+-- on a real guild bank, which would misclassify their guild bank as personal.
+local PERSONAL_BANK_ICON = "Interface\\Icons\\INV_Tabard_Awakening"
+local PERSONAL_BANK_NAME = "personal bank"
+
+--- "personal" | "guild" | "unknown" (tab identity has not arrived yet).
+function GuildBankScanner:GetBankKind()
+    -- A guildless character cannot open a guild bank at all, so anything that
+    -- got this far is the personal one. Decided first because it needs no tab
+    -- data and is therefore available immediately at open.
+    if not GetGuildInfo("player") then
+        return "personal"
+    end
+
+    local name, icon = GetGuildBankTabInfo(1)
+    if not name or name == "" then
+        return "unknown"
+    end
+    if icon == PERSONAL_BANK_ICON then
+        return "personal"
+    end
+    if name:lower() == PERSONAL_BANK_NAME then
+        return "personal"
+    end
+    return "guild"
+end
+
+function GuildBankScanner:IsPersonalBank()
+    return self:GetSessionKind() == "personal"
+end
+
+-- Latched for the whole session, and the only thing the UI is allowed to read.
+--
+-- GetBankKind() re-derives from live tab data, which churns while a session is
+-- open (tabs arrive, get re-queried, and briefly read back empty). The window
+-- must not flip between personal and guild chrome underneath the player, so the
+-- first non-"unknown" answer wins until the bank closes.
+local sessionKind = nil
+
+--- "personal" | "guild" | "unknown" -- the decided kind for the open session.
+function GuildBankScanner:GetSessionKind()
+    return sessionKind or "unknown"
+end
+
+--- Cached-browse override: the offline Personal Bank view has no session to
+--- derive a kind from, so the frame states it explicitly.
+function GuildBankScanner:SetSessionKind(kind)
+    sessionKind = kind
+end
+
+local function ResolveBankKind()
+    if not isGuildBankOpen then return end
+    if sessionKind and sessionKind ~= "unknown" then return end
+    local kind = GuildBankScanner:GetBankKind()
+    if kind == "unknown" then return end
+    sessionKind = kind
+    -- Debug rather than Print: the window title names the bank now, and a
+    -- permanent chat line would be user-facing text with no locale entry.
+    ns:Debug(kind == "personal" and "Personal Bank Opened" or "Guild Bank Opened")
+    if ns.OnGuildBankKindResolved then
+        ns.OnGuildBankKindResolved(kind)
+    end
+end
+
+-------------------------------------------------
 -- Event Handlers
 -------------------------------------------------
 
@@ -463,11 +616,23 @@ local function HandleGuildBankOpened()
     isGuildBankOpen = true
     currentGuildName = GetGuildInfo("player")
     selectedTabIndex = 0  -- Reset to show all tabs
+    sessionKind = nil
+
+    -- Drop whatever the last session left here. cachedGuildBank survives in
+    -- memory across opens, so a container with FEWER tabs than the last one
+    -- inherited the extras: opening a 1-tab Personal Bank after a 3-tab guild
+    -- bank kept 3 tabs' worth of slots in the cache, which is what the footer
+    -- was summing. LoadFromDatabase repopulates it for the offline view.
+    cachedGuildBank = {}
 
     ns:Debug("Guild bank opened for:", currentGuildName or "unknown")
 
     -- Cache tab info
     GuildBankScanner:CacheTabInfo()
+
+    -- Only the guildless case can be decided this early; every other session is
+    -- announced from GUILDBANK_UPDATE_TABS below, once the server sends the tabs.
+    ResolveBankKind()
 
     -- Query all tabs to request data
     local numTabs = GuildBankScanner:GetNumTabs()
@@ -497,6 +662,7 @@ local function HandleGuildBankClosed()
 
     isGuildBankOpen = false
     dirtyTabs = {}
+    sessionKind = nil
 
     ns:Debug("Guild bank closed")
 
@@ -514,6 +680,13 @@ end, GuildBankScanner)
 Events:Register("GUILDBANKFRAME_CLOSED", function()
     ns:Debug("GUILDBANKFRAME_CLOSED event fired")
     HandleGuildBankClosed()
+end, GuildBankScanner)
+
+-- The tab identity that separates a real guild bank from Ascension's Personal
+-- Bank arrives here, one or more events after the open. Fires repeatedly while
+-- the window is open; ResolveBankKind latches the first real answer.
+Events:Register("GUILDBANK_UPDATE_TABS", function()
+    ResolveBankKind()
 end, GuildBankScanner)
 
 -- TBC/Classic fallback: Hook into Blizzard's GuildBankFrame when it loads
@@ -584,6 +757,11 @@ local queryStartTime = 0
 
 Events:Register("GUILDBANKBAGSLOTS_CHANGED", function()
     if not isGuildBankOpen then return end
+
+    -- Backstop for the announcement: if a session ever arrives without a
+    -- GUILDBANK_UPDATE_TABS, the tab identity is still readable by the time slot
+    -- data lands. Idempotent per session, so the usual path is a no-op here.
+    ResolveBankKind()
 
     local now = GetTime()
     ns:Debug("GUILDBANKBAGSLOTS_CHANGED fired, querying:", isQueryingTabs, "elapsed:", now - queryStartTime)

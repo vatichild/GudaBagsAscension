@@ -374,6 +374,31 @@ local function CreateHeader(parent)
         lastLeftButton = guildButton
     end
 
+    -- Ascension Personal Bank: opens the character's cached copy when the
+    -- summoned "Personal Belongings" object isn't around. Uses the server's own
+    -- tab icon (the same texture the discriminator keys on), so it reads as the
+    -- Personal Bank without shipping another asset.
+    if Constants.FEATURES.GUILD_BANK then
+        local personalBankButton = IconButton:Create(titleBar, "Interface\\Icons\\INV_Tabard_Awakening", {
+            tooltip = L["TOOLTIP_PERSONAL_BANK"] or "Personal Bank",
+            onClick = function()
+                local GuildBankFrameModule = ns:GetModule("GuildBankFrame")
+                if GuildBankFrameModule and GuildBankFrameModule.TogglePersonal then
+                    GuildBankFrameModule:TogglePersonal()
+                end
+            end,
+        })
+        if lastLeftButton then
+            personalBankButton:SetPoint("LEFT", lastLeftButton, "RIGHT", 4, 0)
+        else
+            personalBankButton:SetPoint("LEFT", titleBar, "LEFT", 6, 0)
+        end
+        titleBar.personalBankButton = personalBankButton
+        HeaderButtonVisibility:SetKey(personalBankButton, "showHeaderPersonalBank")
+        HeaderButtonVisibility:ApplyState(personalBankButton)
+        lastLeftButton = personalBankButton
+    end
+
     if Constants.FEATURES.MAIL then
         local envelopeButton = IconButton:Create(titleBar, "envelope", {
             tooltip = L["TOOLTIP_MAIL"],
@@ -545,6 +570,7 @@ function Header:SetBackdropAlpha(alpha)
         HeaderButtonVisibility:ApplyState(frame.charactersButton)
         HeaderButtonVisibility:ApplyState(frame.chestButton)
         HeaderButtonVisibility:ApplyState(frame.guildButton)
+        HeaderButtonVisibility:ApplyState(frame.personalBankButton)
         HeaderButtonVisibility:ApplyState(frame.envelopeButton)
     end
     HeaderButtonVisibility:ApplyState(frame.sortButton)
@@ -552,7 +578,8 @@ function Header:SetBackdropAlpha(alpha)
     -- searchButton manages its own Show/Hide via SearchToggleButton's listener
 
     local leftButtons = HeaderButtonVisibility:Filter({
-        frame.charactersButton, frame.chestButton, frame.guildButton, frame.envelopeButton
+        frame.charactersButton, frame.chestButton, frame.guildButton,
+        frame.personalBankButton, frame.envelopeButton
     })
     local rightButtons = HeaderButtonVisibility:Filter({
         frame.settingsButton, frame.sortButton, frame.viewCycleButton, frame.recentToggleButton, frame.searchButton
@@ -630,6 +657,7 @@ function Header:SetNarrowMode(isCompact)
     if titleBar.charactersButton then table.insert(navButtons, titleBar.charactersButton) end
     if titleBar.chestButton then table.insert(navButtons, titleBar.chestButton) end
     if titleBar.guildButton then table.insert(navButtons, titleBar.guildButton) end
+    if titleBar.personalBankButton then table.insert(navButtons, titleBar.personalBankButton) end
     if titleBar.envelopeButton then table.insert(navButtons, titleBar.envelopeButton) end
 
     if isCompact then
@@ -801,6 +829,13 @@ function Header:ShowNavMenu(anchor)
         table.insert(menuItems, { label = L["TOOLTIP_GUILD_BANK"] or "Guild Bank", onClick = function()
             if titleBar.guildButton then
                 titleBar.guildButton:Click()
+            end
+        end})
+    end
+    if Constants.FEATURES.GUILD_BANK and HeaderButtonVisibility:IsSettingEnabled(titleBar.personalBankButton) then
+        table.insert(menuItems, { label = L["TOOLTIP_PERSONAL_BANK"] or "Personal Bank", onClick = function()
+            if titleBar.personalBankButton then
+                titleBar.personalBankButton:Click()
             end
         end})
     end

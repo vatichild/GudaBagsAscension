@@ -264,6 +264,10 @@ Constants.DEFAULTS = {
     locked = false,
     showBorders = true,
     showSearchBar = true,
+    -- Ascension only: opens the character's cached Personal Bank without the
+    -- summoned object. Harmless elsewhere -- the button is gated on the guild
+    -- bank feature flag, since that is the API the Personal Bank rides on.
+    showHeaderPersonalBank = true,
     showFilterChips = false,
     -- Chips the user hid from the filter strip, keyed "q:<0-7>" / "t:<typeKey>" /
     -- "s:<specialKey>". Absent = visible, so chips added in a later version ship

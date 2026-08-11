@@ -284,6 +284,7 @@ commandHandlers["help"] = function()
     ns:Print("  /guda profiledump - Print profiler timings")
     ns:Print("  /guda profilereset - Clear profiler timings")
     ns:Print("  /guda toggle <name> - A/B toggle a subsystem (tooltipscan|glow|masque|upgrade|grouping)")
+    ns:Print("  /guda diag bank - Log bank vs guild bank open events (toggle, survives /reload)")
 end
 
 -------------------------------------------------

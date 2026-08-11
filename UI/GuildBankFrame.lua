@@ -50,10 +50,49 @@ local guildBankHeld = false
 -- numTabs guards against a tab being purchased while away (which IncrementalUpdate,
 -- working slot-by-slot on the existing layout, can't add).
 local guildBankLastRenderSig = nil
+
+-- Ascension Personal Bank
+--
+-- The Personal Bank is the guild bank system reused server-side, so it arrives
+-- through this window (see Data\GuildBankScanner.lua for how the two are told
+-- apart). It has one tab, no money, no deposit/withdraw rights and no log, so
+-- personal mode strips the guild chrome and renders the plain bank-style grid.
+--
+-- personalBrowse is the offline case: no session is open, so there is no session
+-- kind to read and the flag states it instead.
+local personalBrowse = false
+
+function GuildBankFrame:IsPersonalMode()
+    if personalBrowse then return true end
+    if not GuildBankScanner then
+        GuildBankScanner = ns:GetModule("GuildBankScanner")
+    end
+    return GuildBankScanner and GuildBankScanner:GetSessionKind() == "personal" or false
+end
+
+--- Apply/undo the chrome differences in one place, so every entry point
+--- (live open, offline browse, kind resolved late) ends in the same state.
+local function ApplyBankModeChrome()
+    local personal = GuildBankFrame:IsPersonalMode()
+    if GuildBankFooter and GuildBankFooter.SetPersonalMode then
+        GuildBankFooter:SetPersonalMode(personal)
+    end
+    if GuildBankHeader and GuildBankHeader.UpdateTitle then
+        GuildBankHeader:UpdateTitle()
+    end
+end
 local function ComputeGuildBankRenderSig()
     local selectedTab = (GuildBankScanner and GuildBankScanner:GetSelectedTab()) or 0
     local numTabs = (GuildBankScanner and GuildBankScanner:GetNumTabs()) or 0
-    return tostring(selectedTab) .. ":" .. tostring(numTabs)
+    -- Bank kind and view mode are part of the layout, not just the chrome: a
+    -- one-tab guild bank and the Personal Bank would otherwise share a signature
+    -- and the fast reopen would hand one bank the other's layout. The view mode
+    -- matters for the same reason -- category and flat place slots differently.
+    local mode = GuildBankFrame:IsPersonalMode() and "p" or "g"
+    if mode == "p" and Database:GetSetting("bankViewType") == "category" then
+        mode = "pc"
+    end
+    return tostring(selectedTab) .. ":" .. tostring(numTabs) .. ":" .. mode
 end
 
 -- Progressive ("All Tabs" can be ~588 buttons) rendering. Refresh places the
@@ -527,7 +566,10 @@ function GuildBankFrame:ShowSideTabs()
     local maxTabs = Constants.GUILD_BANK_MAX_TABS or 6
     local tabCost = GetGuildBankTabCost and GetGuildBankTabCost() or 0
 
-    if isGuildBankOpen and numPurchasedTabs < maxTabs and tabCost > 0 then
+    -- Never for the Personal Bank: its tabs are not guild tabs and cannot be
+    -- bought, so a "+" here would open a purchase flow that does not apply.
+    if isGuildBankOpen and not GuildBankFrame:IsPersonalMode()
+       and numPurchasedTabs < maxTabs and tabCost > 0 then
         if not frame.purchaseTab then
             frame.purchaseTab = CreatePurchaseTab(frame.sideTabBar)
         end
@@ -1057,12 +1099,17 @@ local function FinishRender(st)
         categoryHeaders[i] = nil
     end
 
-    -- Update footer
+    -- Update footer. Counts only the tab actually on screen when one is
+    -- selected -- the Personal Bank always shows tab 1, and summing every tab
+    -- the server reports would put "x/294" under a 98-slot view.
     local totalSlots = 0
     local freeSlots = 0
-    for _, tabData in pairs(st.guildBank) do
-        totalSlots = totalSlots + (tabData.numSlots or 0)
-        freeSlots = freeSlots + (tabData.freeSlots or 0)
+    local countedTab = st.selectedTab or 0
+    for tabIndex, tabData in pairs(st.guildBank) do
+        if countedTab == 0 or tabIndex == countedTab then
+            totalSlots = totalSlots + (tabData.numSlots or 0)
+            freeSlots = freeSlots + (tabData.freeSlots or 0)
+        end
     end
     GuildBankFooter:UpdateSlotInfo(totalSlots - freeSlots, totalSlots)
     GuildBankFooter:Update()
@@ -1129,13 +1176,18 @@ function GuildBankFrame:Refresh()
     local isGuildBankOpen = GuildBankScanner and GuildBankScanner:IsGuildBankOpen() or false
     ns:Debug("  isGuildBankOpen =", isGuildBankOpen)
 
+    local isPersonal = self:IsPersonalMode()
+    ApplyBankModeChrome()
+
     -- Check if we need to show the purchase tab prompt
     -- This happens when: guild bank is open AND (no tabs purchased OR purchase tab is selected)
     local numTabs = GetNumGuildBankTabs and GetNumGuildBankTabs() or 0
     local tabCost = GetGuildBankTabCost and GetGuildBankTabCost() or 0
     ns:Debug("  numTabs =", numTabs, "tabCost =", tabCost, "showingPurchasePrompt =", showingPurchasePrompt)
 
-    if isGuildBankOpen and (numTabs == 0 or showingPurchasePrompt) then
+    -- Tabs cannot be bought for the Personal Bank, so its (single, fixed) tab
+    -- must never route into the purchase prompt.
+    if not isPersonal and isGuildBankOpen and (numTabs == 0 or showingPurchasePrompt) then
         ns:Debug("  Showing purchase prompt")
         ReleaseAllGuildBankItems()
         frame.container:Hide()
@@ -1228,9 +1280,22 @@ function GuildBankFrame:Refresh()
     frame.emptyMessage:Hide()
     frame.container:Show()
 
-    -- Show side tabs
+    -- No tab strip for the Personal Bank: it is presented as a single container,
+    -- tab 1 only, with nothing to switch to.
+    --
+    -- Also suppressed while the kind is still "unknown" during a live session.
+    -- The identity arrives after the window is already up, so rendering the bar
+    -- optimistically made a Personal Bank show a tab strip that vanished on the
+    -- next refresh. Hiding until we know means the guild bank's strip appears a
+    -- fraction late instead, which is the cheaper mistake -- it stays.
+    local kindUnknown = isGuildBankOpen and GuildBankScanner
+        and GuildBankScanner:GetSessionKind() == "unknown"
     ns:ProfileStart("gb.sidetabs")
-    self:ShowSideTabs()
+    if isPersonal or kindUnknown then
+        self:HideSideTabs()
+    else
+        self:ShowSideTabs()
+    end
     ns:ProfileStop("gb.sidetabs")
 
     local iconSize = Database:GetSetting("iconSize")
@@ -1238,6 +1303,13 @@ function GuildBankFrame:Refresh()
     local columns = Database:GetSetting("guildBankColumns")
     local hasSearch = SearchBar:HasActiveFilters(frame)
     local selectedTab = GuildBankScanner and GuildBankScanner:GetSelectedTab() or 0
+    -- The Personal Bank is presented as one container: always tab 1, never the
+    -- merged all-tabs view, and with no strip to switch away from it. Pinned
+    -- here rather than through SetSelectedTab so it cannot leak into the guild
+    -- bank's own tab selection (that setter also fires a refresh callback).
+    if isPersonal then
+        selectedTab = 1
+    end
 
     -- Collect all slots from guild bank
     ns:ProfileStart("gb.gather")
@@ -1250,6 +1322,81 @@ function GuildBankFrame:Refresh()
         table.insert(sortedTabs, {index = tabIndex, data = tabData})
     end
     table.sort(sortedTabs, function(a, b) return a.index < b.index end)
+
+    -- Personal Bank in category view: reuse the bag/bank category engine rather
+    -- than a second implementation. BuildCategorySections works on itemData, and
+    -- the renderer below already draws `isHeader` entries -- so a section becomes
+    -- a header plus its items and nothing new has to know about categories.
+    local personalCategoryView = isPersonal
+        and (Database:GetSetting("bankViewType") == "category")
+
+    if personalCategoryView then
+        local items = {}
+        -- firstEmptySlot is a {bagID, slot} DESCRIPTOR, not a slot number:
+        -- BuildCategorySections indexes it to build the Empty pseudo item.
+        local emptyCount, firstEmptySlot = 0, nil
+        for _, tabEntry in ipairs(sortedTabs) do
+            local tabIndex, tabData = tabEntry.index, tabEntry.data
+            -- Same single-tab rule as the flat path above.
+            if selectedTab > 0 and tabIndex ~= selectedTab then
+                tabData = nil
+            end
+            if tabData and tabData.slots then
+                for slot = 1, (tabData.numSlots or Constants.GUILD_BANK_SLOTS_PER_TAB) do
+                    local itemData = tabData.slots[slot]
+                    if itemData then
+                        -- Same adaptation RenderOneSlot does: the category engine
+                        -- and ItemButton both address a slot as bagID+slot, and
+                        -- isGuildBank is what routes clicks to the guild bank API.
+                        local adapted = {}
+                        for k, v in pairs(itemData) do adapted[k] = v end
+                        adapted.bagID = tabIndex
+                        adapted.slot = slot
+                        adapted.isGuildBank = true
+                        items[#items + 1] = { bagID = tabIndex, slot = slot, itemData = adapted }
+                    else
+                        emptyCount = emptyCount + 1
+                        if not firstEmptySlot then
+                            firstEmptySlot = { bagID = tabIndex, slot = slot }
+                        end
+                    end
+                end
+            end
+        end
+
+        -- Soul/quiver counts are zero, soul is not force-shown and drop targets
+        -- are off: none of those concepts exist for a guild-bank-backed
+        -- container (the bank passes forceSoulVisible because it really does
+        -- have a soul bag slot).
+        local sections = LayoutEngine:BuildCategorySections(
+            items, not isGuildBankOpen, emptyCount, firstEmptySlot,
+            0, nil, nil, nil, 0, nil)
+
+        for _, section in ipairs(sections) do
+            allSlots[#allSlots + 1] = {
+                isHeader = true,
+                tabIndex = (firstEmptySlot and firstEmptySlot.bagID) or 1,
+                tabName = section.categoryName or "",
+                tabIcon = section.categoryIcon,
+            }
+            for _, item in ipairs(section.items) do
+                local itemData = item.itemData
+                -- The collapsed "Empty (N)" tile already carries the first free
+                -- tab/slot (BuildCategorySections copies it off firstEmptySlot);
+                -- it just needs the flag that routes clicks to the guild bank API.
+                if itemData and itemData.isEmptySlots then
+                    itemData.isGuildBank = true
+                end
+                allSlots[#allSlots + 1] = {
+                    tabIndex = itemData and itemData.bagID or item.bagID,
+                    slot = itemData and itemData.slot or item.slot,
+                    itemData = itemData,
+                }
+            end
+        end
+
+        sortedTabs = {}   -- consumed; skip the flat gather below
+    end
 
     for _, tabEntry in ipairs(sortedTabs) do
         local tabIndex = tabEntry.index
@@ -1283,18 +1430,28 @@ function GuildBankFrame:Refresh()
 
     ns:ProfileStop("gb.gather")
 
-    -- Calculate content dimensions
+    -- Calculate content dimensions by walking the list the same way the renderer
+    -- will: a header ends the current row and starts a new one. Counting
+    -- ceil(slots/columns) instead under-measures as soon as sections are in play
+    -- (category view is many small sections, so the frame came up too short).
     local numSlots = 0
     local headerCount = 0
+    local itemRows = 0
+    local rowCol = 0
     for _, slotInfo in ipairs(allSlots) do
         if slotInfo.isHeader then
             headerCount = headerCount + 1
+            if rowCol > 0 then
+                itemRows = itemRows + 1
+                rowCol = 0
+            end
         else
             numSlots = numSlots + 1
+            if rowCol == 0 then itemRows = itemRows + 1 end
+            rowCol = rowCol + 1
+            if rowCol >= columns then rowCol = 0 end
         end
     end
-
-    local itemRows = math.ceil(numSlots / columns)
     local contentWidth = (iconSize * columns) + (spacing * (columns - 1))
     local headerHeight = 20
     -- Calculate height: item rows + spacing between rows + headers (not double-counted)
@@ -1410,6 +1567,8 @@ function GuildBankFrame:Refresh()
         hasSearch = hasSearch,
         isReadOnly = not isGuildBankOpen,
         guildBank = guildBank,
+        -- Which tab the footer's slot counter should describe (0 = all).
+        selectedTab = selectedTab,
     }
     -- Record the view this render produced so a later reopen can tell whether the
     -- retained layout still matches (→ fast IncrementalUpdate instead of full Refresh).
@@ -1447,6 +1606,14 @@ end
 function GuildBankFrame:IncrementalUpdate(dirtyTabs)
     if not frame or not frame:IsShown() then return end
     if not layoutCached or renderState or showingPurchasePrompt then
+        self:Refresh()
+        return
+    end
+    -- Category view places a button by which category its item belongs to, but
+    -- this path is keyed by tab:slot and updates buttons where they already sit.
+    -- Refreshing an item in place would leave it under the wrong header, so the
+    -- personal category view takes the full path instead.
+    if self:IsPersonalMode() and Database:GetSetting("bankViewType") == "category" then
         self:Refresh()
         return
     end
@@ -1534,6 +1701,9 @@ function GuildBankFrame:Toggle()
     if frame:IsShown() then
         frame:Hide()
     else
+        -- Guild view: a live personal session would otherwise leave the window in
+        -- personal mode with the guild's data.
+        personalBrowse = false
         if GuildBankScanner and GuildBankScanner:IsGuildBankOpen() then
             GuildBankScanner:ScanAllTabs()
         else
@@ -1548,6 +1718,46 @@ function GuildBankFrame:Toggle()
         GuildBankHeader:UpdateTitle()
         frame:Show()
     end
+end
+
+--- Offline Personal Bank: the summoned object is not around, so read the
+--- character's cached copy and show it read-only. Same window, personal chrome.
+function GuildBankFrame:TogglePersonal()
+    LoadComponents()
+
+    if not frame then
+        frame = CreateGuildBankFrame()
+        RestoreFramePosition()
+    end
+
+    if frame:IsShown() then
+        frame:Hide()
+        personalBrowse = false
+        return
+    end
+
+    if GuildBankScanner and GuildBankScanner:IsGuildBankOpen()
+       and GuildBankScanner:GetSessionKind() == "personal" then
+        -- Live session already open: show the real thing rather than the cache.
+        personalBrowse = false
+        GuildBankScanner:ScanAllTabs()
+    else
+        if not (GuildBankScanner and GuildBankScanner:LoadPersonalFromDatabase()) then
+            ns:Print(L["PERSONAL_BANK_NO_DATA"] or "No stored Personal Bank data for this character.")
+            return
+        end
+        personalBrowse = true
+    end
+
+    -- Layout state belongs to whichever bank was rendered last; a mode switch
+    -- must not reuse it or the fast-reopen path would redraw the other bank.
+    layoutCached = false
+    guildBankLastRenderSig = nil
+
+    self:Refresh()
+    UpdateFrameAppearance(true)
+    GuildBankHeader:UpdateTitle()
+    frame:Show()
 end
 
 -- True when a reopen can reuse the retained layout and just reconcile changed slots
@@ -1577,6 +1787,9 @@ function GuildBankFrame:Show()
         if GuildBankScanner and GuildBankScanner:IsGuildBankOpen() then
             GuildBankScanner:ScanAllTabs()
         end
+        -- Cheap and idempotent: the second open of a personal session must not
+        -- leave the guild chrome the first render put up before the kind resolved.
+        ApplyBankModeChrome()
         self:IncrementalUpdate(nil)
         return
     end
@@ -1615,6 +1828,9 @@ function GuildBankFrame:Show()
     local canFast = self:CanFastReopen()
     guildBankHeld = false
     if canFast then
+        -- The signature already proved the retained layout belongs to this bank
+        -- kind; this just re-applies the footer/title that go with it.
+        ApplyBankModeChrome()
         frame:Show()
         UpdateFrameAppearance(true)
         GuildBankHeader:UpdateTitle()
@@ -1700,9 +1916,42 @@ end
 -------------------------------------------------
 
 -- Called when guild bank is opened
+--- The kind is only known once the server sends tab info, which is after the
+--- window is already up -- so the first render is necessarily in guild chrome.
+--- Re-render when the answer lands, otherwise a Personal Bank keeps the side
+--- tabs and deposit buttons it was drawn with.
+ns.OnGuildBankKindResolved = function(kind)
+    ns:Debug("OnGuildBankKindResolved:", kind)
+
+    -- The Personal Bank opens straight onto tab 1 rather than the merged "All
+    -- Tabs" view. Done on the scanner (not just pinned at render time) so the
+    -- selection state the rest of the file reads agrees with what is drawn.
+    if kind == "personal" and GuildBankScanner
+       and GuildBankScanner:GetSelectedTab() ~= 1 then
+        -- SetSelectedTab fires ns.OnGuildBankTabChanged, which refreshes the
+        -- frame; doing our own Refresh here as well would render twice.
+        GuildBankScanner:SetSelectedTab(1)
+        if frame and frame:IsShown() then
+            UpdateFrameAppearance(true)
+            GuildBankHeader:UpdateTitle()
+        end
+        return
+    end
+
+    if not frame or not frame:IsShown() then return end
+    layoutCached = false
+    guildBankLastRenderSig = nil
+    GuildBankFrame:Refresh()
+    UpdateFrameAppearance(true)
+    GuildBankHeader:UpdateTitle()
+end
+
 ns.OnGuildBankOpened = function()
     ns:Debug("OnGuildBankOpened callback triggered")
     LoadComponents()
+
+    -- A live session outranks whatever offline copy was last browsed.
+    personalBrowse = false
 
     -- Auto open bags on guild bank interaction (before showing guild bank so it stays on top).
     -- Routes through BagFrame's smart-open helper so bagsAutoOpened tracking stays in sync
@@ -1799,9 +2048,13 @@ ns.OnGuildBankTabsUpdated = function()
     if frame and frame:IsShown() then
         -- Reset purchase prompt state when tabs change (e.g., after purchase)
         showingPurchasePrompt = false
-        -- Full refresh to handle purchase prompt visibility and tab changes
+        -- Full refresh to handle purchase prompt visibility and tab changes.
+        -- Refresh decides the side tabs itself (shown for a guild bank, hidden
+        -- for the Personal Bank and while the kind is still unknown), so there
+        -- is deliberately no ShowSideTabs call here: this event is GUILDBANK_-
+        -- UPDATE_TABS, the very event that identifies a Personal Bank, and
+        -- re-showing the bar afterwards is what kept its tab strip on screen.
         GuildBankFrame:Refresh()
-        GuildBankFrame:ShowSideTabs()
     end
 end
 

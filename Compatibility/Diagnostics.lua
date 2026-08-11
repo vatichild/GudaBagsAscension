@@ -24,6 +24,8 @@ local addonName, ns = ...
 local Diagnostics = {}
 ns.Diagnostics = Diagnostics
 
+local CreateFrame = ns.CreateFrame or CreateFrame
+
 local report = {}
 
 -------------------------------------------------
@@ -1150,8 +1152,349 @@ local function DumpShimReport()
     end
 end
 
---- /guda diag [shim|mouse|children|restack|mog|markers|guid|taint|currency|unblock]
+-------------------------------------------------
+-- Bank vs Guild Bank watcher  (/guda diag bank)
+-------------------------------------------------
+-- GudaBags shows the same UI for both banks on this client, which means the
+-- guild-bank open path is not being reached. Which of the three possible causes
+-- it is -- the event never fires, Blizzard_GuildBankUI never loads so the frame
+-- hook is dead, or the guild banker fires BANKFRAME_OPENED and the personal path
+-- wins -- is not answerable from source, so measure it at the banker instead.
+--
+-- Its own frame, not Core\Events.lua: registering each name here with a pcall
+-- reports what THIS client accepts per event, rather than inheriting the Events
+-- module's fallback/unsupported handling. Logging only -- nothing here changes
+-- how either bank opens.
+
+local BANK_WATCH_EVENTS = {
+    -- personal bank (Interface\AddOns\APIDocumentation\...\BankDocumentation.lua)
+    "BANKFRAME_OPENED",
+    "BANKFRAME_CLOSED",
+    "PLAYERBANKSLOTS_CHANGED",
+    "PLAYERBANKBAGSLOTS_CHANGED",
+    -- guild bank (...\GuildBankDocumentation.lua)
+    "GUILDBANKFRAME_OPENED",
+    "GUILDBANKFRAME_CLOSED",
+    "GUILDBANKBAGSLOTS_CHANGED",
+    "GUILDBANK_UPDATE_TABS",
+    "GUILDBANK_UPDATE_MONEY",
+    "GUILDBANK_ITEM_LOCK_CHANGED",
+    "GUILDBANKLOG_UPDATE",
+    "GUILDBANK_TEXT_CHANGED",
+    -- the guild bank UI is load-on-demand, so its load is itself a signal
+    "ADDON_LOADED",
+    -- Ascension's Personal Bank is reached by USING an item (110000), which
+    -- summons the "Personal Belongings" object (46). Nothing in Extensions.dll
+    -- mentions a personal bank, so it is the guild bank system reused
+    -- server-side -- meaning the guild events below fire for BOTH banks and the
+    -- only client-visible difference is what preceded the open, plus the tab
+    -- identity the server sends. This is the "what preceded it" half.
+    "UNIT_SPELLCAST_SUCCEEDED",
+    -- retail-only; registering it here proves whether this client knows the name
+    "PLAYER_INTERACTION_MANAGER_FRAME_SHOW",
+}
+
+-- Events that arrive in bursts while a bank is open. Logged, but they must not
+-- drown the open/close lines, so they only log while a session is open.
+local BANK_WATCH_NOISY = {
+    PLAYERBANKSLOTS_CHANGED = true,
+    PLAYERBANKBAGSLOTS_CHANGED = true,
+    GUILDBANKBAGSLOTS_CHANGED = true,
+    GUILDBANK_ITEM_LOCK_CHANGED = true,
+    GUILDBANK_UPDATE_MONEY = true,
+    GUILDBANK_TEXT_CHANGED = true,
+    GUILDBANKLOG_UPDATE = true,
+}
+
+local bankWatchFrame = nil
+local bankWatchStart = 0
+local bankWatchSessionOpen = false
+local bankWatchHookedGuildFrame = false
+
+--- Call `fn` and stringify its first return; a missing/erroring API becomes
+--- "n/a" rather than aborting the handler mid-snapshot.
+local function safeCall(fn, ...)
+    if type(fn) ~= "function" then return "n/a" end
+    local ok, v = pcall(fn, ...)
+    if not ok then return "err" end
+    if v == nil then return "nil" end
+    return tostring(v)
+end
+
+local function frameState(name)
+    local f = _G[name]
+    if not f then return name .. "=absent" end
+    local shown = (f.IsShown and f:IsShown()) and "shown" or "hidden"
+    return name .. "=" .. shown
+end
+
+--- One line of everything that could tell the two banks apart. GetNumGuildBankTabs
+--- > 0 next to the event name is the actual discriminator; the rest is here so a
+--- surprising answer can be explained without a second trip to the banker.
+local function bankWatchState()
+    return table.concat({
+        "target=" .. safeCall(UnitName, "target"),
+        "guid=" .. safeCall(UnitGUID, "target"),
+        "guildTabs=" .. safeCall(GetNumGuildBankTabs),
+        "curTab=" .. safeCall(GetCurrentGuildBankTab),
+        "guildMoney=" .. safeCall(GetGuildBankMoney),
+        "bankSlots=" .. safeCall(GetNumBankSlots),
+        "inGuild=" .. safeCall(IsInGuild),
+        frameState("BankFrame"),
+        frameState("GuildBankFrame"),
+        "gbUILoaded=" .. safeCall(IsAddOnLoaded, "Blizzard_GuildBankUI"),
+    }, " | ")
+end
+
+local function bankWatchLog(fmt, ...)
+    line("|cffffff00[bankwatch +%.2fs]|r " .. fmt, GetTime() - bankWatchStart, ...)
+    -- Written on every line, not just at stop: the answer must survive a
+    -- disconnect at the banker as well as a clean /reload.
+    GudaBags_Diag = report
+end
+
+-- Last thing the player cast, kept so an open can be attributed to what caused
+-- it. Using the Personal Bank item is a cast; walking up to a guild banker is
+-- not, so "a cast landed 2s ago" is the behavioural discriminator if the tab
+-- identity below turns out to be identical for both banks.
+local bankWatchLastCast, bankWatchLastCastAt = nil, 0
+
+--- Who the server thinks this guild-bank session belongs to. Tab NAMES are the
+--- most promising discriminator: the Personal Bank is the guild bank system
+--- reused, so the packets are the same, but the tabs it sends are the server's
+--- own. Printed on open AND again on GUILDBANK_UPDATE_TABS, because tab info
+--- arrives asynchronously and is usually still empty at the moment of the open.
+local function DumpGuildBankIdentity(why)
+    -- Same predicate the addon itself uses, so the log can never disagree with
+    -- the "Personal Bank Opened" line -- and so a wrong verdict is visible here
+    -- next to the raw fields it was derived from.
+    local GuildBankScanner = ns:GetModule("GuildBankScanner")
+    local verdict = (GuildBankScanner and GuildBankScanner.GetBankKind)
+        and safeCall(GuildBankScanner.GetBankKind, GuildBankScanner) or "n/a"
+    bankWatchLog("  identity (%s): verdict=%s", why, verdict)
+    bankWatchLog("    guild=%s | numTabs=%s | money=%s | withdrawLimit=%s | canWithdrawMoney=%s",
+        safeCall(GetGuildInfo, "player"),
+        safeCall(GetNumGuildBankTabs),
+        safeCall(GetGuildBankMoney),
+        safeCall(GetGuildBankWithdrawLimit),
+        safeCall(CanWithdrawGuildBankMoney))
+
+    local numTabs = tonumber(safeCall(GetNumGuildBankTabs)) or 0
+    if numTabs == 0 then
+        bankWatchLog("    (no tabs reported yet)")
+        return
+    end
+    for i = 1, numTabs do
+        local ok, name, icon, isViewable, canDeposit, numWithdrawals = pcall(GetGuildBankTabInfo, i)
+        if ok then
+            bankWatchLog("    tab %d: name=%s | icon=%s | viewable=%s | deposit=%s | withdrawals=%s | text=%s",
+                i, tostring(name), tostring(icon), tostring(isViewable),
+                tostring(canDeposit), tostring(numWithdrawals),
+                safeCall(GetGuildBankText, i))
+        else
+            bankWatchLog("    tab %d: GetGuildBankTabInfo errored", i)
+        end
+    end
+end
+
+-- Log-only hook on Blizzard's guild bank frame. HookScript, never SetScript:
+-- Data\GuildBankScanner.lua:539 hooks the same frame for real behaviour and must
+-- not be displaced.
+-- HookScript is additive and cannot be undone, so both callbacks check the
+-- enabled flag themselves: once the watcher is stopped they must go quiet
+-- instead of printing for the rest of the session.
+local BankWatchEnabled   -- forward declaration; defined with the toggle below
+
+local function BankWatchHookGuildFrame()
+    if bankWatchHookedGuildFrame then return end
+    local f = _G.GuildBankFrame
+    if not f or not f.HookScript then return end
+    bankWatchHookedGuildFrame = true
+    f:HookScript("OnShow", function()
+        if not BankWatchEnabled() then return end
+        bankWatchSessionOpen = true
+        bankWatchLog(">>> GUILD-BANK-TYPE FRAME SHOWN (Blizzard GuildBankFrame OnShow)")
+        bankWatchLog("    %s", bankWatchState())
+        DumpGuildBankIdentity("frame OnShow")
+    end)
+    f:HookScript("OnHide", function()
+        if not BankWatchEnabled() then return end
+        bankWatchLog("<<< guild bank frame hidden")
+    end)
+    bankWatchLog("hooked Blizzard GuildBankFrame OnShow/OnHide")
+end
+
+--- How long ago the player last cast something, as a string. "never" when the
+--- watcher has not seen a cast this session.
+local function lastCastAgo()
+    if not bankWatchLastCast then return "never" end
+    return ("%s (%.1fs ago)"):format(bankWatchLastCast, GetTime() - bankWatchLastCastAt)
+end
+
+local function BankWatchOnEvent(_, event, arg1, arg2)
+    if event == "ADDON_LOADED" then
+        if arg1 ~= "Blizzard_GuildBankUI" then return end
+        bankWatchLog("ADDON_LOADED: Blizzard_GuildBankUI (guild bank UI is load-on-demand)")
+        BankWatchHookGuildFrame()
+        return
+    end
+
+    if event == "UNIT_SPELLCAST_SUCCEEDED" then
+        -- Recorded silently -- every cast in combat would otherwise bury the
+        -- bank lines. Reported as part of the open snapshot instead.
+        if arg1 == "player" and arg2 then
+            bankWatchLastCast, bankWatchLastCastAt = tostring(arg2), GetTime()
+        end
+        return
+    end
+
+    if event == "BANKFRAME_OPENED" then
+        bankWatchSessionOpen = true
+        bankWatchLog(">>> BANKER BANK OPENED (BANKFRAME_OPENED) -- the normal banker")
+    elseif event == "GUILDBANKFRAME_OPENED" then
+        bankWatchSessionOpen = true
+        -- Both the real guild bank and Ascension's Personal Bank land here.
+        bankWatchLog(">>> GUILD-BANK-TYPE OPENED (GUILDBANKFRAME_OPENED) -- guild bank OR Personal Bank")
+        bankWatchLog("    lastCast=%s", lastCastAgo())
+    elseif event == "BANKFRAME_CLOSED" or event == "GUILDBANKFRAME_CLOSED" then
+        bankWatchLog("<<< %s", event)
+        bankWatchSessionOpen = false
+    elseif event == "GUILDBANK_UPDATE_TABS" then
+        bankWatchLog("%s", event)
+        DumpGuildBankIdentity("GUILDBANK_UPDATE_TABS")
+        return
+    elseif BANK_WATCH_NOISY[event] then
+        if not bankWatchSessionOpen then return end
+        bankWatchLog("%s", event)
+        return   -- burst event: name only, no snapshot
+    else
+        bankWatchLog("%s", event)
+    end
+
+    bankWatchLog("    %s", bankWatchState())
+
+    if event == "GUILDBANKFRAME_OPENED" then
+        DumpGuildBankIdentity("at open")
+        -- Tab names usually arrive after the open, so take a second look once
+        -- the server has answered; that late pass is the one likely to carry
+        -- the name that separates the two banks.
+        if C_Timer and C_Timer.After then
+            C_Timer.After(1.5, function()
+                if BankWatchEnabled() then DumpGuildBankIdentity("1.5s after open") end
+            end)
+        end
+    end
+end
+
+--- `quiet` is the login re-arm: the full registration report belongs to the run
+--- where you switched the watcher on, not to every subsequent login. Re-arming
+--- silently would be worse though -- a watcher you forgot about is exactly what
+--- makes its output look like the addon spamming you -- so it still says one line.
+local function StartBankWatch(quiet)
+    if not bankWatchFrame then
+        bankWatchFrame = CreateFrame("Frame")
+        bankWatchFrame:SetScript("OnEvent", BankWatchOnEvent)
+    end
+    bankWatchStart = GetTime()
+    bankWatchSessionOpen = false
+
+    if quiet then
+        for _, event in ipairs(BANK_WATCH_EVENTS) do
+            pcall(bankWatchFrame.RegisterEvent, bankWatchFrame, event)
+        end
+        if IsAddOnLoaded and IsAddOnLoaded("Blizzard_GuildBankUI") then
+            BankWatchHookGuildFrame()
+        end
+        DEFAULT_CHAT_FRAME:AddMessage(
+            "|cff00ccff[diag]|r bank watch is still ARMED from an earlier session -- /guda diag bank to stop it")
+        return
+    end
+
+    line("---- bank watch ARMED ----")
+    local ok, rejected = {}, {}
+    for _, event in ipairs(BANK_WATCH_EVENTS) do
+        -- RegisterEvent RAISES on a name this client does not know, so each one
+        -- is guarded and the failure recorded: a rejected name is itself an answer.
+        if pcall(bankWatchFrame.RegisterEvent, bankWatchFrame, event) then
+            ok[#ok + 1] = event
+        else
+            rejected[#rejected + 1] = event
+        end
+    end
+    line("registered (%d): %s", #ok, table.concat(ok, ", "))
+    if #rejected > 0 then
+        line("REJECTED by this client (%d): %s", #rejected, table.concat(rejected, ", "))
+    else
+        line("REJECTED by this client: none")
+    end
+
+    -- Nothing else prints this, and "the addon already knows this event does not
+    -- exist" is exactly the kind of finding we are here for.
+    local Events = ns:GetModule("Events")
+    if Events and type(Events.unsupported) == "table" then
+        local names = {}
+        for name in pairs(Events.unsupported) do names[#names + 1] = name end
+        table.sort(names)
+        line("Events.unsupported (%d): %s", #names,
+            #names > 0 and table.concat(names, ", ") or "none")
+    end
+
+    if IsAddOnLoaded and IsAddOnLoaded("Blizzard_GuildBankUI") then
+        BankWatchHookGuildFrame()
+    else
+        line("Blizzard_GuildBankUI not loaded yet -- will hook its frame when it loads")
+    end
+
+    line("Now open a normal banker, close it, then open a guild banker.")
+    line("Run /guda diag bank again to stop, then /reload to write GudaBags_Diag.")
+end
+
+local function StopBankWatch()
+    if bankWatchFrame then
+        pcall(bankWatchFrame.UnregisterAllEvents, bankWatchFrame)
+    end
+    -- The OnShow/OnHide hooks cannot be removed (HookScript is additive), so they
+    -- stay for the session; they early-out below via the enabled flag.
+    line("---- bank watch STOPPED ---- /reload to write GudaBags_Diag to disk")
+end
+
+--- Enabled state lives in the account DB so it survives /reload: the watcher is
+--- armed once and left running while walking between the two bankers.
+--- Assigns the forward-declared local above -- do NOT add `local` here.
+function BankWatchEnabled()
+    return type(GudaBags_DB) == "table" and GudaBags_DB.diagBankWatch == true
+end
+
+local function ToggleBankWatch()
+    if type(GudaBags_DB) ~= "table" then
+        line("GudaBags_DB not initialised yet -- try again after login completes")
+        return
+    end
+    if BankWatchEnabled() then
+        GudaBags_DB.diagBankWatch = nil
+        StopBankWatch()
+    else
+        GudaBags_DB.diagBankWatch = true
+        StartBankWatch()
+    end
+end
+
+-- Re-arm after a /reload if it was left on.
+function Diagnostics:RestoreBankWatch()
+    if BankWatchEnabled() then
+        report = {}
+        StartBankWatch(true)   -- quiet: one reminder line, not the full report
+    end
+end
+
+--- /guda diag [shim|mouse|children|restack|mog|markers|guid|taint|currency|bank|unblock]
 function Diagnostics:Dispatch(arg)
+    if arg == "bank" then
+        if not BankWatchEnabled() then report = {} end   -- keep prior lines when stopping
+        pcall(ToggleBankWatch)
+        GudaBags_Diag = report
+        return
+    end
     if arg == "shim" then
         report = {}
         pcall(DumpShimReport)
@@ -1237,3 +1580,18 @@ end
 -- from the theme rather than from the frame itself.
 --
 -- A diagnostic must never change the state it is measuring. Run it explicitly.
+--
+-- The one exception below is not that: re-arming the bank watcher only registers
+-- events and prints, it shows no frame and touches no UI state. It exists so the
+-- watcher can be switched on once and survive the /reload between visiting the
+-- two bankers, which is the whole point of persisting its flag.
+do
+    local Events = ns:GetModule("Events")
+    if Events then
+        Events:Register("PLAYER_LOGIN", function()
+            if Diagnostics.RestoreBankWatch then
+                pcall(Diagnostics.RestoreBankWatch, Diagnostics)
+            end
+        end, Diagnostics)
+    end
+end

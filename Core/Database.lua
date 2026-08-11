@@ -697,6 +697,72 @@ function Database:GetGuildBankTabInfo(guildName)
     return nil
 end
 
+-------------------------------------------------
+-- Ascension Personal Bank
+-------------------------------------------------
+-- Stored in its own table rather than under a synthetic guildBanks key: the
+-- Personal Bank arrives over the guild bank API, but it belongs to the
+-- CHARACTER, and GuildBankScanner:LoadFromDatabase walks GetAllGuildBanks() by
+-- name -- a fake guild in there would surface as one. Same tab-shaped payload,
+-- so GetNormalizedGuildBank's normalisation applies to it unchanged.
+
+function Database:SavePersonalBank(charKey, personalBankData)
+    if not GudaBags_DB then return end
+    if not charKey then return end
+
+    if not GudaBags_DB.personalBanks then
+        GudaBags_DB.personalBanks = {}
+    end
+
+    GudaBags_DB.personalBanks[charKey] = personalBankData
+    GudaBags_DB.personalBanks[charKey].lastUpdate = time()
+end
+
+function Database:GetPersonalBank(charKey)
+    if not GudaBags_DB or not GudaBags_DB.personalBanks then return nil end
+    if not charKey then return nil end
+
+    return GudaBags_DB.personalBanks[charKey]
+end
+
+--- Same normalisation as GetNormalizedGuildBank (SavedVariables turn numeric
+--- keys into strings), reusing it so the two cannot drift apart.
+function Database:GetNormalizedPersonalBank(charKey)
+    local stored = self:GetPersonalBank(charKey)
+    if not stored or not stored.tabs then return nil end
+
+    -- Temporarily present it in the shape the guild normaliser reads.
+    local normalized = {}
+    for tabKey, tabData in pairs(stored.tabs) do
+        if type(tabData) == "table" then
+            local normalizedTab = {
+                tabIndex = tabData.tabIndex,
+                name = tabData.name,
+                icon = tabData.icon,
+                numSlots = tabData.numSlots,
+                freeSlots = tabData.freeSlots,
+                slots = {},
+            }
+            if tabData.slots then
+                for slotKey, slotData in pairs(tabData.slots) do
+                    normalizedTab.slots[tonumber(slotKey) or slotKey] = slotData
+                end
+            end
+            normalized[tonumber(tabKey) or tabKey] = normalizedTab
+        end
+    end
+
+    return normalized
+end
+
+function Database:GetPersonalBankTabInfo(charKey)
+    local stored = self:GetPersonalBank(charKey)
+    if stored and stored.tabInfo then
+        return stored.tabInfo
+    end
+    return nil
+end
+
 function Database:GetAllGuildBanks()
     if not GudaBags_DB or not GudaBags_DB.guildBanks then
         return {}

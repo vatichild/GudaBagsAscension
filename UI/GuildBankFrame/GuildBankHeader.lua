@@ -189,7 +189,27 @@ function GuildBankHeader:SetGuildName(guildName)
     end
 end
 
+--- Ascension's Personal Bank shares this window, so the title is what tells the
+--- player which one they are looking at: character name in the addon's usual
+--- gold, matching UI\Header.lua's "<name>'s Bags", instead of the guild green.
+function GuildBankHeader:SetPersonalTitle()
+    if not frame or not frame.title then return end
+    local playerName = UnitName("player") or ""
+    frame.title:SetText(playerName .. (L["TITLE_PERSONAL_BANK"] or "'s Personal Bank"))
+    frame.title:SetTextColor(1, 0.82, 0)
+end
+
 function GuildBankHeader:UpdateTitle()
+    local GuildBankFrame = ns:GetModule("GuildBankFrame")
+    if GuildBankFrame and GuildBankFrame.IsPersonalMode and GuildBankFrame:IsPersonalMode() then
+        self:SetPersonalTitle()
+        return
+    end
+
+    -- Restore the guild colour: the same font string carries both titles.
+    if frame and frame.title then
+        frame.title:SetTextColor(0, 0.8, 0.4)
+    end
     local guildName = GetGuildInfo("player")
     self:SetGuildName(guildName)
 end

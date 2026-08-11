@@ -177,6 +177,12 @@ function SettingsSchema.GetFeatures()
             { type = "checkbox", key = "showHeaderMail", label = L["SETTINGS_SHOW_HEADER_MAIL"], tooltip = L["SETTINGS_SHOW_HEADER_MAIL_TIP"] },
         }},
         { type = "row", children = {
+            -- Ascension's Personal Bank arrives over the guild bank API, so it
+            -- shares that feature flag.
+            { type = "checkbox", key = "showHeaderPersonalBank", label = L["SETTINGS_SHOW_HEADER_PERSONAL_BANK"], tooltip = L["SETTINGS_SHOW_HEADER_PERSONAL_BANK_TIP"],
+              hidden = function() return not (ns.Constants.FEATURES and ns.Constants.FEATURES.GUILD_BANK) end },
+        }},
+        { type = "row", children = {
             { type = "checkbox", key = "showHeaderSort", label = L["SETTINGS_SHOW_HEADER_SORT"], tooltip = L["SETTINGS_SHOW_HEADER_SORT_TIP"] },
             { type = "checkbox", key = "showHeaderSearch", label = L["SETTINGS_SHOW_HEADER_SEARCH"], tooltip = L["SETTINGS_SHOW_HEADER_SEARCH_TIP"] },
         }},
