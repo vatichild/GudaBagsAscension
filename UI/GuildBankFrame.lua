@@ -106,6 +106,32 @@ renderDriver:Hide()
 -- calls CancelRender, which is assigned below.
 local CancelRender
 
+-- Coalesced full refresh.
+--
+-- Measured on one Personal Bank open (the /guda diag bank log): the server sent
+-- GUILDBANK_UPDATE_TABS 14 times and GUILDBANKBAGSLOTS_CHANGED 13 times, spread
+-- across 14 seconds. Refreshing per event meant a dozen-plus complete re-renders
+-- of the whole grid while the player waited -- which is what "the first open
+-- takes too long" actually was, far more than button creation. Collapsing a
+-- burst into one render is the same batching Rule 2 already requires of
+-- BagScanner and the deferred saver.
+--
+-- Defined up here because both the event callbacks at the bottom of the file and
+-- IncrementalUpdate (which falls back to a full render in personal category
+-- view) route through it.
+local pendingRefreshTimer = nil
+local function ScheduleGuildBankRefresh(delay)
+    if pendingRefreshTimer then return end   -- a render is already queued
+    pendingRefreshTimer = C_Timer.NewTimer(delay or 0.25, function()
+        pendingRefreshTimer = nil
+        -- Guarded rather than cancelled on hide: a queued render for a window
+        -- that closed in the meantime is simply dropped here.
+        if frame and frame:IsShown() then
+            GuildBankFrame:Refresh()
+        end
+    end)
+end
+
 
 -- Hidden frame to reparent Blizzard guild bank UI (used by some versions)
 local hiddenParent = CreateFrame("Frame")
@@ -1612,9 +1638,10 @@ function GuildBankFrame:IncrementalUpdate(dirtyTabs)
     -- Category view places a button by which category its item belongs to, but
     -- this path is keyed by tab:slot and updates buttons where they already sit.
     -- Refreshing an item in place would leave it under the wrong header, so the
-    -- personal category view takes the full path instead.
+    -- personal category view takes the full path instead -- queued, because the
+    -- slot events that land here arrive in bursts while the bank opens.
     if self:IsPersonalMode() and Database:GetSetting("bankViewType") == "category" then
-        self:Refresh()
+        ScheduleGuildBankRefresh()
         return
     end
     local guildBank = GuildBankScanner and GuildBankScanner:GetCachedGuildBank()
@@ -1953,49 +1980,62 @@ ns.OnGuildBankOpened = function()
     -- A live session outranks whatever offline copy was last browsed.
     personalBrowse = false
 
-    -- Auto open bags on guild bank interaction (before showing guild bank so it stays on top).
-    -- Routes through BagFrame's smart-open helper so bagsAutoOpened tracking stays in sync
-    -- with mail/merchant/AH/etc. (see UI/BagFrame.lua SmartAutoOpen).
-    local BagFrameModule = ns:GetModule("BagFrame")
-    if BagFrameModule then
-        BagFrameModule:OnAutoInteractionOpen()
-    end
-
-    -- Show our guild bank frame (Blizzard's frame is hidden by GuildBankScanner)
+    -- The bank window goes up FIRST and nothing else is allowed in front of it.
+    --
+    -- This callback used to auto-open the bags, then show the bank, then sync
+    -- frame levels across every button in both containers, then re-render the
+    -- bags again -- 674ms measured, with the bank window waiting behind all of
+    -- it. What the player is waiting for is this one call; the rest is
+    -- housekeeping that can land a frame later without anyone noticing.
     GuildBankFrame:Show()
 
-    -- Raise guild bank above bags so interaction frame is always respected
-    if BagFrameModule and BagFrameModule:IsShown() then
-        local bagFrame = BagFrameModule:GetFrame()
-        if bagFrame then
-            bagFrame:SetFrameLevel(Constants.FRAME_LEVELS.BASE)
-            Theme:SyncBlizzardBgLevel(bagFrame)
-            if bagFrame.container then
-                bagFrame.container:SetFrameLevel(Constants.FRAME_LEVELS.BASE + Constants.FRAME_LEVELS.CONTAINER)
-                ItemButton:SyncFrameLevels(bagFrame.container)
+    -- Everything below is deferred to the next frame so the window paints first.
+    -- C_Timer.After(0) fires on the following OnUpdate, i.e. after the bank has
+    -- been drawn, so the bags open "behind" the bank rather than ahead of it.
+    C_Timer.After(0, function()
+
+        -- Auto open bags on guild bank interaction. Routes through BagFrame's
+        -- smart-open helper so bagsAutoOpened tracking stays in sync with
+        -- mail/merchant/AH/etc. (see UI/BagFrame.lua SmartAutoOpen).
+        local BagFrameModule = ns:GetModule("BagFrame")
+        if BagFrameModule then
+            BagFrameModule:OnAutoInteractionOpen()
+        end
+
+        -- Raise guild bank above bags so interaction frame is always respected
+        if BagFrameModule and BagFrameModule:IsShown() then
+            local bagFrame = BagFrameModule:GetFrame()
+            if bagFrame then
+                bagFrame:SetFrameLevel(Constants.FRAME_LEVELS.BASE)
+                Theme:SyncBlizzardBgLevel(bagFrame)
+                if bagFrame.container then
+                    bagFrame.container:SetFrameLevel(Constants.FRAME_LEVELS.BASE + Constants.FRAME_LEVELS.CONTAINER)
+                    ItemButton:SyncFrameLevels(bagFrame.container)
+                end
             end
         end
-    end
-    if frame then
-        frame:SetFrameLevel(Constants.FRAME_LEVELS.RAISED)
-        Theme:SyncBlizzardBgLevel(frame)
-        if frame.container then
-            ItemButton:SyncFrameLevels(frame.container)
+        if frame then
+            frame:SetFrameLevel(Constants.FRAME_LEVELS.RAISED)
+            Theme:SyncBlizzardBgLevel(frame)
+            if frame.container then
+                ItemButton:SyncFrameLevels(frame.container)
+            end
         end
-    end
 
-    -- Refresh bags to update stacking (unstack when interaction window opens).
-    -- View-aware: only category view re-renders (single view has no grouping), so
-    -- this no longer does a pointless full bag refresh on open in single view.
-    if BagFrameModule and BagFrameModule:IsShown() then
-        if BagFrameModule.RefreshForInteraction then
-            BagFrameModule:RefreshForInteraction()
+        -- Refresh bags to update stacking (unstack when interaction window opens).
+        -- View-aware: only category view re-renders (single view has no grouping), so
+        -- this no longer does a pointless full bag refresh on open in single view.
+        if BagFrameModule and BagFrameModule:IsShown() then
+            if BagFrameModule.RefreshForInteraction then
+                BagFrameModule:RefreshForInteraction()
+            end
+            local bagFrame = BagFrameModule:GetFrame()
+            if bagFrame then
+                SearchBar:UpdateTransferState(bagFrame)
+            end
         end
-        local bagFrame = BagFrameModule:GetFrame()
-        if bagFrame then
-            SearchBar:UpdateTransferState(bagFrame)
-        end
-    end
+
+    end)
 end
 
 -- Called when guild bank is closed
@@ -2054,7 +2094,10 @@ ns.OnGuildBankTabsUpdated = function()
         -- is deliberately no ShowSideTabs call here: this event is GUILDBANK_-
         -- UPDATE_TABS, the very event that identifies a Personal Bank, and
         -- re-showing the bar afterwards is what kept its tab strip on screen.
-        GuildBankFrame:Refresh()
+        --
+        -- Queued, not immediate: this event arrives in bursts while the bank
+        -- opens (14 times in the measured open).
+        ScheduleGuildBankRefresh()
     end
 end
 

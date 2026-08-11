@@ -23,6 +23,14 @@ local isGuildBankOpen = false
 local selectedTabIndex = 0  -- 0 = all tabs, 1+ = specific tab
 local currentGuildName = nil
 
+-- Query suppression. Declared here rather than next to the
+-- GUILDBANKBAGSLOTS_CHANGED handler because the OPEN path has to set them too:
+-- the server's replies to the opening queries arrive as GUILDBANKBAGSLOTS_CHANGED,
+-- and without this window each reply scheduled another full query-all + rescan-all
+-- cycle -- the storm that made a cold open crawl.
+local isQueryingTabs = false
+local queryStartTime = 0
+
 -- Dirty tracking for incremental updates
 local dirtyTabs = {}
 local pendingUpdate = false
@@ -249,28 +257,52 @@ function GuildBankScanner:ScanTab(tabIndex)
     return tabData
 end
 
+--- Tabs worth querying and scanning, as a plain array.
+---
+--- The Personal Bank is displayed as tab 1 only (UI\GuildBankFrame.lua pins the
+--- selection), but this client reports THREE tabs for it -- so scanning "all"
+--- meant 3 server queries and 294 slot reads per pass to render 98 slots. The
+--- guild bank still scans every tab: its All-Tabs view shows them, and its cache
+--- feeds the offline view.
+function GuildBankScanner:GetScanTabs()
+    local numTabs = self:GetNumTabs()
+    if numTabs == 0 then return {} end
+
+    if self:GetSessionKind() == "personal" then
+        return { 1 }
+    end
+
+    local tabs = {}
+    for i = 1, numTabs do tabs[i] = i end
+    return tabs
+end
+
 function GuildBankScanner:ScanAllTabs()
     if not isGuildBankOpen then
         ns:Debug("ScanAllTabs: Guild bank not open, returning cached data")
         return cachedGuildBank
     end
 
-    local numTabs = self:GetNumTabs()
-    ns:Debug("ScanAllTabs: numTabs =", numTabs)
+    local tabs = self:GetScanTabs()
+    ns:Debug("ScanAllTabs: scanning", #tabs, "of", self:GetNumTabs(), "tabs")
 
-    if numTabs == 0 then
+    if #tabs == 0 then
         ns:Debug("ScanAllTabs: No tabs found")
         return cachedGuildBank
     end
 
-    -- Query all tabs to request data from server
-    for i = 1, numTabs do
+    -- Query first, so the server is already answering while we scan what it sent
+    -- last time. Marked as ours: the replies land as GUILDBANKBAGSLOTS_CHANGED,
+    -- and each unsuppressed reply would otherwise schedule another full cycle.
+    isQueryingTabs = true
+    queryStartTime = GetTime()
+    for _, i in ipairs(tabs) do
         ns:Debug("ScanAllTabs: Querying tab", i)
         QueryViewableTab(i)
     end
 
     -- Scan each tab (data may not be fully loaded yet, but scan what's available)
-    for i = 1, numTabs do
+    for _, i in ipairs(tabs) do
         self:ScanTab(i)
     end
 
@@ -634,14 +666,11 @@ local function HandleGuildBankOpened()
     -- announced from GUILDBANK_UPDATE_TABS below, once the server sends the tabs.
     ResolveBankKind()
 
-    -- Query all tabs to request data
-    local numTabs = GuildBankScanner:GetNumTabs()
-    ns:Debug("  numTabs =", numTabs)
-    for i = 1, numTabs do
-        QueryViewableTab(i)
-    end
+    ns:Debug("  numTabs =", GuildBankScanner:GetNumTabs())
 
-    -- Initial scan (may have partial data)
+    -- Initial scan. ScanAllTabs queries first and then scans, so the separate
+    -- query loop that used to sit here was a second full round of server
+    -- requests for the same data on every single open.
     GuildBankScanner:ScanAllTabs()
 
     -- Show the frame immediately (GUILDBANKBAGSLOTS_CHANGED will trigger refresh when data arrives)
@@ -714,6 +743,10 @@ local function HookBlizzardGuildBankFrame()
 
         -- Make Blizzard frame invisible but keep it "shown"
         -- This prevents OnHide from firing unexpectedly
+        --
+        -- Only reachable on a client where something else loaded that UI: we
+        -- block the loader outright at the bottom of this file, so normally
+        -- GuildBankFrame never exists.
         self:SetAlpha(0)
         self:ClearAllPoints()
         self:SetPoint("TOPLEFT", UIParent, "TOPLEFT", -10000, 10000)
@@ -752,8 +785,9 @@ end
 -- Debounce timer for guild bank slot changes
 local slotChangeTimer = nil
 local scanTimer = nil
-local isQueryingTabs = false  -- Track when we initiated queries (to ignore resulting events)
-local queryStartTime = 0
+-- isQueryingTabs / queryStartTime are declared at the top of the file: the open
+-- path sets them too, and re-declaring them here would shadow those, leaving the
+-- opening queries' replies unsuppressed (each one then scheduling a full cycle).
 
 Events:Register("GUILDBANKBAGSLOTS_CHANGED", function()
     if not isGuildBankOpen then return end
@@ -788,14 +822,15 @@ Events:Register("GUILDBANKBAGSLOTS_CHANGED", function()
 
         if not isGuildBankOpen then return end
 
-        local numTabs = GuildBankScanner:GetNumTabs()
-        ns:Debug("  Querying", numTabs, "tabs for fresh data")
+        -- Only the displayed tabs, same rule as the open path: for the Personal
+        -- Bank that is tab 1, not the three this client reports.
+        local tabs = GuildBankScanner:GetScanTabs()
+        ns:Debug("  Querying", #tabs, "tabs for fresh data")
 
         isQueryingTabs = true
         queryStartTime = GetTime()
 
-        -- Query all tabs
-        for i = 1, numTabs do
+        for _, i in ipairs(tabs) do
             QueryViewableTab(i)
         end
 
@@ -806,10 +841,9 @@ Events:Register("GUILDBANKBAGSLOTS_CHANGED", function()
 
             if not isGuildBankOpen then return end
 
-            ns:Debug("  Scanning", numTabs, "tabs after query")
+            ns:Debug("  Scanning", #tabs, "tabs after query")
 
-            -- Scan all tabs
-            for i = 1, numTabs do
+            for _, i in ipairs(tabs) do
                 GuildBankScanner:ScanTab(i)
             end
 
@@ -864,11 +898,11 @@ Events:Register("GUILDBANK_ITEM_LOCK_CHANGED", function(event, tabIndex, slotInd
 
             if not isGuildBankOpen then return end
 
-            -- Rescan all tabs
-            local numTabs = GuildBankScanner:GetNumTabs()
-            ns:Debug("  Scanning", numTabs, "tabs after lock change")
+            -- Rescan the displayed tabs only (see GetScanTabs)
+            local tabs = GuildBankScanner:GetScanTabs()
+            ns:Debug("  Scanning", #tabs, "tabs after lock change")
 
-            for i = 1, numTabs do
+            for _, i in ipairs(tabs) do
                 GuildBankScanner:ScanTab(i)
             end
 
@@ -940,14 +974,10 @@ if Expansion and Expansion.InterfaceVersion and Expansion.InterfaceVersion >= 50
                 -- Cache tab info
                 GuildBankScanner:CacheTabInfo()
 
-                -- Query all tabs to request data
-                local numTabs = GuildBankScanner:GetNumTabs()
-                ns:Debug("  numTabs =", numTabs)
-                for i = 1, numTabs do
-                    QueryViewableTab(i)
-                end
+                ns:Debug("  numTabs =", GuildBankScanner:GetNumTabs())
 
-                -- Initial scan
+                -- Initial scan. ScanAllTabs queries the displayed tabs itself, so
+                -- the query loop that used to sit here just doubled the requests.
                 GuildBankScanner:ScanAllTabs()
 
                 -- Preemptively hide Blizzard frame before it shows
@@ -988,5 +1018,33 @@ Events:OnPlayerLogin(function()
         currentGuildName = guildName
         GuildBankScanner:LoadFromDatabase(guildName)
     end
+
 end, GuildBankScanner)
+
+-------------------------------------------------
+-- Keep Blizzard's guild bank UI out of the way
+-------------------------------------------------
+-- On this client, showing Blizzard's own guild bank frame freezes the game for
+-- several seconds the first time. Measured, not inferred: with GudaBags fully
+-- DISABLED the default UI froze exactly the same way, while Bagnon opened the
+-- same container instantly -- and our own Lua on that path totals ~320ms, with
+-- the bank watch showing 4.6s in which no addon event fires at all.
+--
+-- Bagnon is fast because it never lets that UI exist: it replaces this FrameXML
+-- loader (Bagnon\main.lua:CreateGuildBankLoader) so Blizzard_GuildBankUI is
+-- never loaded. We do the same. GuildBankFrame then stays nil and Blizzard's
+-- `ShowUIPanel(GuildBankFrame)` in UIParent's GUILDBANKFRAME_OPENED handler is a
+-- no-op (ShowUIPanel returns early on a nil frame).
+--
+-- Safe here because this port drives everything from GUILDBANKFRAME_OPENED,
+-- which is confirmed present on this client (Interface\AddOns\APIDocumentation
+-- documents it, and the bank watch logs it on every open). The Blizzard-frame
+-- HookScript fallback below stays for clients where the event is missing: it
+-- simply never finds a frame to hook here.
+if not ns.blizzardGuildBankBlocked and type(GuildBankFrame_LoadUI) == "function" then
+    ns.blizzardGuildBankBlocked = true
+    GuildBankFrame_LoadUI = function()
+        ns:Debug("Blocked Blizzard_GuildBankUI load (GudaBags replaces that UI)")
+    end
+end
 

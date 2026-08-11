@@ -75,6 +75,12 @@ function ns:ProfileReset()
 end
 
 -- Print a compact summary table sorted by total time descending.
+--
+-- Also written to the GudaBags_Diag saved variable, under `.profile`, so a run
+-- can be read back off disk after a /reload instead of copied out of the chat
+-- frame. Kept as a keyed field rather than replacing the table, so it coexists
+-- with the diagnostics report (an array) that shares this saved variable --
+-- though `/guda diag <sub>` reassigns GudaBags_Diag wholesale and will drop it.
 function ns:ProfileDump()
     local rows = {}
     for label, s in pairs(stats) do
@@ -86,12 +92,21 @@ function ns:ProfileDump()
     end
     table.sort(rows, function(a, b) return a.s.total > b.s.total end)
 
+    local header = string.format("%-28s %6s %9s %8s %8s", "label", "count", "total ms", "avg ms", "max ms")
+    local lines = { "=== GudaBags Profiler ===", header }
+
     self:Print("=== GudaBags Profiler ===")
-    self:Print(string.format("%-28s %6s %9s %8s %8s", "label", "count", "total ms", "avg ms", "max ms"))
+    self:Print(header)
     for _, row in ipairs(rows) do
         local s = row.s
         local avg = s.count > 0 and (s.total / s.count) or 0
-        self:Print(string.format("%-28s %6d %9.2f %8.3f %8.3f",
-            row.label, s.count, s.total, avg, s.max))
+        local line = string.format("%-28s %6d %9.2f %8.3f %8.3f",
+            row.label, s.count, s.total, avg, s.max)
+        self:Print(line)
+        lines[#lines + 1] = line
     end
+
+    if type(GudaBags_Diag) ~= "table" then GudaBags_Diag = {} end
+    GudaBags_Diag.profile = lines
+    self:Print("|cff00ccff[profile]|r saved to GudaBags_Diag.profile -- /reload to write it to disk")
 end
