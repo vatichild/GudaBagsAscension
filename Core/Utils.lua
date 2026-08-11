@@ -89,6 +89,20 @@ function Utils:SetAnimAlphaRange(anim, from, to)
     if anim.SetChange then anim:SetChange(to - from) end
 end
 
+-- StaticPopup dialogs expose their hasEditBox widget under a different field
+-- per client: modern retail as `EditBox`, 3.3.5a/Ascension as `editBox` (plus
+-- the named global <dialog>EditBox). Hardcoding either one nils out on the
+-- other, which is how profile import died on 3.3.5. Read-only lookup on a
+-- Blizzard-owned frame -- nothing is written back onto the dialog.
+function Utils:GetPopupEditBox(popup)
+    if not popup then return nil end
+    local box = popup.editBox or popup.EditBox
+    if not box and popup.GetName and popup:GetName() then
+        box = _G[popup:GetName() .. "EditBox"]
+    end
+    return box
+end
+
 -------------------------------------------------
 -- Item Key Generation
 -- Creates a unique key for an item based on its properties

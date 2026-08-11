@@ -4,6 +4,7 @@ local ProfilesTab = {}
 ns:RegisterModule("ProfilesTab", ProfilesTab)
 
 local Events = ns:GetModule("Events")
+local Utils = ns:GetModule("Utils")
 local Constants = ns.Constants
 local L = ns.L
 
@@ -101,11 +102,17 @@ StaticPopupDialogs["GUDABAGS_PROFILE_IMPORT_NAME"] = {
     button2 = CANCEL,
     hasEditBox = true,
     OnShow = function(self)
-        self.EditBox:SetText(L["PROFILE_IMPORTED_DEFAULT"])
-        self.EditBox:HighlightText()
+        local editBox = Utils:GetPopupEditBox(self)
+        if not editBox then return end
+        editBox:SetText(L["PROFILE_IMPORTED_DEFAULT"])
+        editBox:HighlightText()
     end,
     OnAccept = function(self)
-        local name = self.EditBox:GetText()
+        local editBox = Utils:GetPopupEditBox(self)
+        -- No resolvable edit box means we never prefilled one either, so the
+        -- default name is what the user was shown -- import under it rather
+        -- than dropping the decoded profile on the floor.
+        local name = editBox and editBox:GetText() or L["PROFILE_IMPORTED_DEFAULT"]
         if name and name ~= "" and self.data then
             local ProfileManager = ns:GetModule("ProfileManager")
             if ProfileManager:ProfileExists(name) then
