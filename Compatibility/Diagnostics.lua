@@ -1487,8 +1487,186 @@ function Diagnostics:RestoreBankWatch()
     end
 end
 
---- /guda diag [shim|mouse|children|restack|mog|markers|guid|taint|currency|bank|unblock]
+--- Why the Personal Bank sort does or does not do anything -- in one read-only
+--- pass, saved to disk.
+---
+--- docs\PERSONAL_BANK_SORT_PLAN.md section 3 lists a bail reason per failure, but
+--- those only reach chat, only while /guda debug is on, and only if someone is
+--- watching -- which is why the failure went unmeasured for three sessions. This
+--- lands the same facts in GudaBags_Diag, where they survive a /reload and can be
+--- read off disk.
+---
+--- Moves nothing and changes nothing: the plan comes from GuildBankSort:DryRun.
+--- The point of the cached-vs-live pair is the comparison -- a divergence means
+--- the sorter was planning against stale data, and identical-but-unchanged after
+--- a move means the client never refreshed the tab.
+local function DumpGuildBankSort()
+    local GuildBankSort = ns:GetModule("GuildBankSort")
+    local GuildBankScanner = ns:GetModule("GuildBankScanner")
+    local GuildBankFrame = ns:GetModule("GuildBankFrame")
+
+    line("=== guild bank sort ===")
+    line("build: %s", tostring(ns.version))
+
+    -- 1. Wiring. Sorting\GuildBankSort.lua is a .toc addition, and a .toc addition
+    -- does not load on /reload -- so "module absent" here means restart the
+    -- client, not fix the code.
+    local FEATURES = (ns.Constants and ns.Constants.FEATURES) or {}
+    line("modules: GuildBankSort=%s | GuildBankScanner=%s | GuildBankFrame=%s",
+        tostring(GuildBankSort ~= nil), tostring(GuildBankScanner ~= nil),
+        tostring(GuildBankFrame ~= nil))
+    line("features: GUILD_BANK=%s | SORT=%s",
+        tostring(FEATURES.GUILD_BANK), tostring(FEATURES.SORT))
+
+    if not GuildBankScanner then
+        line("GuildBankScanner missing -- nothing further can be read")
+        return
+    end
+
+    -- 2. Session. The sort refuses anything that is not a resolved personal
+    -- session, and addresses one tab -- so both have to be visible here.
+    local personalMode = (GuildBankFrame and GuildBankFrame.IsPersonalMode)
+        and safeCall(GuildBankFrame.IsPersonalMode, GuildBankFrame) or "n/a"
+    line("session: open=%s | kind=%s | personalMode=%s | sorting=%s",
+        safeCall(GuildBankScanner.IsGuildBankOpen, GuildBankScanner),
+        safeCall(GuildBankScanner.GetSessionKind, GuildBankScanner),
+        personalMode,
+        (GuildBankSort and GuildBankSort.IsSorting)
+            and safeCall(GuildBankSort.IsSorting, GuildBankSort) or "n/a")
+    line("tabs: numTabs=%s | currentTab=%s | selectedTab=%s | slotsPerTab=%s",
+        safeCall(GetNumGuildBankTabs),
+        safeCall(GetCurrentGuildBankTab),
+        safeCall(GuildBankScanner.GetSelectedTab, GuildBankScanner),
+        safeCall(GuildBankScanner.GetSlotsPerTab, GuildBankScanner))
+
+    local numTabs = tonumber(safeCall(GetNumGuildBankTabs)) or 0
+    for i = 1, numTabs do
+        local ok, name, icon, isViewable, canDeposit, numWithdrawals, remaining =
+            pcall(GetGuildBankTabInfo, i)
+        if ok then
+            line("  tab %d: name=%s | icon=%s | viewable=%s | deposit=%s | withdrawals=%s/%s",
+                i, tostring(name), tostring(icon), tostring(isViewable),
+                tostring(canDeposit), tostring(remaining), tostring(numWithdrawals))
+        else
+            line("  tab %d: GetGuildBankTabInfo errored", i)
+        end
+    end
+
+    -- The tab the sorter would actually address, resolved the same way it does.
+    local tab = tonumber(safeCall(GetCurrentGuildBankTab)) or 0
+    if tab < 1 then tab = tonumber(safeCall(GuildBankScanner.GetSelectedTab, GuildBankScanner)) or 0 end
+    if tab < 1 then
+        line("no usable tab index -- the sort would bail with 'no current tab'")
+        return
+    end
+    line("sorting would target tab %d", tab)
+
+    local slotsPerTab = tonumber(safeCall(GuildBankScanner.GetSlotsPerTab, GuildBankScanner)) or 98
+
+    -- 3. Cached tab. Note slots is SPARSE -- keyed by slot index, empties absent.
+    local okCached, tabData = pcall(GuildBankScanner.GetCachedTab, GuildBankScanner, tab)
+    if not okCached then tabData = nil end
+    if not tabData then
+        line("cached tab %d: ABSENT -- the sort would bail with 'no cached data'", tab)
+    else
+        local occupied, shown = 0, 0
+        for slot = 1, (tabData.numSlots or slotsPerTab) do
+            local d = tabData.slots and tabData.slots[slot]
+            if d then
+                occupied = occupied + 1
+                if shown < 10 then
+                    shown = shown + 1
+                    line("  cached %3d: id=%s x%s q=%s class=%s/%s ilvl=%s locked=%s %s",
+                        slot, tostring(d.itemID), tostring(d.count), tostring(d.quality),
+                        tostring(d.classID), tostring(d.subclassID),
+                        tostring(d.itemLevel), tostring(d.locked), tostring(d.name))
+                end
+            end
+        end
+        line("cached tab %d: numSlots=%s freeSlots=%s occupied=%d",
+            tab, tostring(tabData.numSlots), tostring(tabData.freeSlots), occupied)
+    end
+
+    -- 4. Live tab, read straight from the client with the same two calls the
+    -- sorter verifies moves with.
+    local liveOccupied, liveShown = 0, 0
+    for slot = 1, slotsPerTab do
+        local okInfo, texture, count, locked = pcall(GetGuildBankItemInfo, tab, slot)
+        local okLink, link = pcall(GetGuildBankItemLink, tab, slot)
+        if okInfo and texture then
+            liveOccupied = liveOccupied + 1
+            if liveShown < 10 then
+                liveShown = liveShown + 1
+                local itemID = okLink and link and tostring(link):match("item:(%d+)") or "nil"
+                line("  live   %3d: id=%s x%s locked=%s link=%s",
+                    slot, itemID, tostring(count), tostring(locked),
+                    okLink and tostring(link) or "err")
+            end
+        end
+    end
+    line("live tab %d: occupied=%d of %d", tab, liveOccupied, slotsPerTab)
+
+    -- 5. The plan itself. Zero moves against a non-empty tab is the 'already
+    -- sorted' bail, and says the comparator -- not the mover -- is the problem.
+    if not (GuildBankSort and GuildBankSort.DryRun) then
+        line("GuildBankSort:DryRun unavailable -- cannot plan (old build loaded?)")
+        return
+    end
+    local Database = ns:GetModule("Database")
+    line("sortPriority=%s", Database and safeCall(Database.GetSetting, Database, "sortPriority") or "n/a")
+
+    local function reportPlan(label)
+        local ok, moves = pcall(GuildBankSort.DryRun, GuildBankSort, tab)
+        if not ok then
+            line("%s plan: errored: %s", label, tostring(moves))
+            return
+        end
+        if not moves then
+            line("%s plan: nothing -- no snapshot for tab %d", label, tab)
+            return
+        end
+        line("%s plan: %d moves", label, #moves)
+        for i = 1, math.min(10, #moves) do
+            local m = moves[i]
+            line("  move %2d: slot %d -> %d (id=%s x%s)",
+                i, m.srcSlot, m.dstSlot, tostring(m.itemID), tostring(m.count))
+        end
+    end
+
+    -- DryRun plans from the scanner's cache, so this first pass is what a sort
+    -- would have produced from stale data.
+    reportPlan("cached")
+
+    -- Then the plan the sort actually builds, which rescans first. The only side
+    -- effect of this whole dump: it refreshes the scanner cache, exactly as any
+    -- bank event does. If the two plans differ, staleness was the problem.
+    if GuildBankScanner.ScanTab and GuildBankScanner:IsGuildBankOpen() then
+        pcall(GuildBankScanner.ScanTab, GuildBankScanner, tab)
+        reportPlan("rescanned")
+    end
+
+    -- 6. The last sort's own trace. A sort points GudaBags_Diag at its log, so
+    -- running this probe afterwards would otherwise throw that log away -- fold it
+    -- in instead, and the two can be read together.
+    local log = GuildBankSort.GetLog and GuildBankSort:GetLog()
+    if log and #log > 0 then
+        line("--- last sort trace (%d lines) ---", #log)
+        for i = 1, #log do line("  %s", tostring(log[i])) end
+    else
+        line("--- no sort has run this session ---")
+    end
+end
+
+--- /guda diag [shim|mouse|children|restack|mog|markers|guid|taint|currency|bank|gbsort|unblock]
 function Diagnostics:Dispatch(arg)
+    if arg == "gbsort" then
+        report = {}
+        pcall(DumpGuildBankSort)
+        GudaBags_Diag = report
+        DEFAULT_CHAT_FRAME:AddMessage(
+            "|cff00ccff[diag]|r saved to GudaBags_Diag -- /reload to write it to disk")
+        return
+    end
     if arg == "bank" then
         if not BankWatchEnabled() then report = {} end   -- keep prior lines when stopping
         pcall(ToggleBankWatch)

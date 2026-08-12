@@ -105,6 +105,16 @@ function GuildBankScanner:IsSortInProgress()
     return sortInProgress
 end
 
+--- Ask the server for one tab's contents again.
+---
+--- Both data handlers stop querying while a sort runs (see SetSortInProgress), so
+--- the sorter needs a way to nudge the client itself when a move has not shown up
+--- in GetGuildBankItemLink yet. Same permission guard as every other query.
+function GuildBankScanner:RequeryTab(tabIndex)
+    if not isGuildBankOpen or not tabIndex or tabIndex < 1 then return end
+    QueryViewableTab(tabIndex)
+end
+
 function GuildBankScanner:GetTabInfo(tabIndex)
     if not tabIndex or tabIndex < 1 then return nil end
 
@@ -228,6 +238,10 @@ function GuildBankScanner:ScanSlot(tabIndex, slotIndex)
         texture = texture or itemTexture,
         count = itemCount or 1,
         quality = quality or itemQuality or 0,
+        -- Stored, not discarded: Sorting\GuildBankSort.lua's "ilvl" priority reads
+        -- this, and without it every entry compares as itemLevel 0 and the setting
+        -- silently degrades to quality-then-class.
+        itemLevel = itemLevel or 0,
         locked = locked,
         itemType = itemType,
         itemSubType = itemSubType,

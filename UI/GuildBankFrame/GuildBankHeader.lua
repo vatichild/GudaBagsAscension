@@ -171,6 +171,24 @@ end
 
 local lastAlpha = 1
 
+--- Style and re-chain the right-hand icons.
+---
+--- Split out of SetBackdropAlpha so SetSortShown can call it too: the sort button
+--- appears and disappears with the bank kind, which resolves *after* the header is
+--- built, and Theme:ApplyHeaderButtons is what gives a header icon its background.
+--- Left out of this list, the sort button was the only bare icon in the row.
+---
+--- Order is right-to-left from the close button, matching creation order:
+--- close <- settings <- sort <- search. Filter drops whichever are hidden, so the
+--- chain never leaves a gap.
+local function ApplyRightButtons()
+    if not frame then return end
+    local rightButtons = HeaderButtonVisibility:Filter({
+        frame.settingsButton, frame.sortButton, frame.searchButton
+    })
+    Theme:ApplyHeaderButtons(frame, {}, rightButtons, frame.closeButton)
+end
+
 function GuildBankHeader:SetBackdropAlpha(alpha)
     if not frame then return end
     lastAlpha = alpha
@@ -196,16 +214,7 @@ function GuildBankHeader:SetBackdropAlpha(alpha)
             frame:SetFrameLevel(parent:GetFrameLevel() + Constants.FRAME_LEVELS.HEADER)
         end
     end
-    local rightButtons = HeaderButtonVisibility:Filter({
-        frame.settingsButton, frame.searchButton
-    })
-
-    Theme:ApplyHeaderButtons(
-        frame,
-        {},
-        rightButtons,
-        frame.closeButton
-    )
+    ApplyRightButtons()
 end
 
 -- Re-apply layout when any header button setting flips.
@@ -228,7 +237,11 @@ end
 --- looking like a guild bank picks the button up as soon as it is identified.
 function GuildBankHeader:SetSortShown(shown)
     if not frame or not frame.sortButton then return end
+    if frame.sortButton:IsShown() == (shown and true or false) then return end
     if shown then frame.sortButton:Show() else frame.sortButton:Hide() end
+    -- Re-chain and re-style: the button was hidden when the header was last laid
+    -- out, so Filter had dropped it and it carries no theme background yet.
+    ApplyRightButtons()
 end
 
 --- Greyed out while a sort runs, so a second click cannot start another pass.

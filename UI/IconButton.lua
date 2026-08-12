@@ -44,6 +44,15 @@ local ICONS = {
         texture = "Interface\\AddOns\\GudaBags\\Assets\\envelope.tga",
         size = 16,
     },
+    personalBank = {
+        -- Ascension's Personal Bank. Previously the game's own
+        -- INV_Tabard_Awakening -- which is what the server puts on the bank's tab,
+        -- and still how GuildBankScanner IDENTIFIES a personal bank session, so do
+        -- not chase that constant when changing this one. As a header icon it was
+        -- the only button not drawn from the addon's own set.
+        texture = "Interface\\AddOns\\GudaBags\\Assets\\equipment.tga",
+        size = 16,
+    },
     viewCycle = {
         texture = "Interface\\AddOns\\GudaBags\\Assets\\categories.tga",
         size = 16,

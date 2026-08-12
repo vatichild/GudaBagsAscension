@@ -375,11 +375,11 @@ local function CreateHeader(parent)
     end
 
     -- Ascension Personal Bank: opens the character's cached copy when the
-    -- summoned "Personal Belongings" object isn't around. Uses the server's own
-    -- tab icon (the same texture the discriminator keys on), so it reads as the
-    -- Personal Bank without shipping another asset.
+    -- summoned "Personal Belongings" object isn't around. Uses the addon's own
+    -- equipment.tga (IconButton's "personalBank"), so it sits in the header as one
+    -- of the set rather than as a lone game icon -- see the note on that entry.
     if Constants.FEATURES.GUILD_BANK then
-        local personalBankButton = IconButton:Create(titleBar, "Interface\\Icons\\INV_Tabard_Awakening", {
+        local personalBankButton = IconButton:Create(titleBar, "personalBank", {
             tooltip = L["TOOLTIP_PERSONAL_BANK"] or "Personal Bank",
             onClick = function()
                 local GuildBankFrameModule = ns:GetModule("GuildBankFrame")
