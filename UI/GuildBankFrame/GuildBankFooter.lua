@@ -16,6 +16,10 @@ local mainGuildBankFrame = nil
 -- it, and that closure is built before the setter is defined.
 local personalMode = false
 local PERSONAL_FOOTER_HEIGHT = 22
+-- Footer tab indicators. Sized to sit inside PERSONAL_FOOTER_HEIGHT without
+-- growing the single-row personal footer.
+local PERSONAL_TAB_SIZE = 18
+local PERSONAL_TAB_SPACING = 3
 
 local GuildBankScanner = nil
 local Money = nil
@@ -128,6 +132,23 @@ function GuildBankFooter:Init(parent)
     slotInfoFrame:SetScript("OnLeave", function()
         GameTooltip:Hide()
     end)
+
+    -- Personal Bank tab strip, at the footer's left edge with the slot counter
+    -- following it. UpdatePersonalTabs owns both anchors, because whether the
+    -- counter sits after the strip or at the edge itself depends on whether there
+    -- is more than one tab to show.
+    --
+    -- The Personal Bank renders every tab merged into one grid, which is the
+    -- right presentation but leaves the player no way to tell that a second tab
+    -- exists or how full it is. These are indicators first and navigation second:
+    -- hovering highlights that tab's slots in the grid, clicking scrolls to them.
+    -- They deliberately do NOT filter the view -- that would undo the merge.
+    local personalTabBar = CreateFrame("Frame", nil, frame)
+    personalTabBar:SetPoint("LEFT", frame, "LEFT", 0, 0)
+    personalTabBar:SetSize(1, PERSONAL_TAB_SIZE)
+    personalTabBar:Hide()
+    frame.personalTabBar = personalTabBar
+    frame.personalTabs = {}
 
     -- Center buttons container (Log | Money Log | Info) - bottom row center
     local centerBtns = CreateFrame("Frame", nil, frame)
@@ -341,8 +362,9 @@ function GuildBankFooter:SetPersonalMode(on)
     end
 
     if on then
-        -- Single row: just the slot counter, anchored where the deposit button
-        -- would have been so it lines up with the grid's left edge.
+        -- Single row, starting at the grid's left edge where the deposit button
+        -- would have been. This is the one-tab position; UpdatePersonalTabs below
+        -- pushes the counter right of the tab strip when there is one to show.
         frame:SetHeight(PERSONAL_FOOTER_HEIGHT)
         frame.currentHeight = PERSONAL_FOOTER_HEIGHT
         if frame.slotInfoFrame then
@@ -357,10 +379,145 @@ function GuildBankFooter:SetPersonalMode(on)
             frame.slotInfoFrame:SetPoint("LEFT", frame.withdrawBtn, "RIGHT", 8, 0)
         end
     end
+
+    -- Follows the mode both ways: hidden as soon as a guild session takes the
+    -- footer back, rebuilt when a personal one claims it.
+    self:UpdatePersonalTabs()
 end
 
 function GuildBankFooter:IsPersonalMode()
     return personalMode
+end
+
+--- One indicator per Personal Bank tab, right of the slot counter.
+---
+--- Rebuilt in place rather than pooled: there are at most a handful, they are
+--- plain Buttons (not the secure item template), and they are only created the
+--- first time a tab index is seen -- so this is not a per-refresh allocation.
+function GuildBankFooter:UpdatePersonalTabs()
+    if not frame or not frame.personalTabBar then return end
+
+    local scanner = GuildBankScanner or ns:GetModule("GuildBankScanner")
+    -- Guild bank keeps its own side strip; this belongs to the merged view only.
+    -- Returns without touching slotInfoFrame: the guild layout owns that anchor.
+    if not personalMode or not scanner then
+        frame.personalTabBar:Hide()
+        return
+    end
+
+    local cachedBank = scanner:GetCachedGuildBank()
+    local tabs = {}
+    if cachedBank then
+        for tabIndex, tabData in pairs(cachedBank) do
+            if type(tabIndex) == "number" then
+                tabs[#tabs + 1] = { index = tabIndex, data = tabData }
+            end
+        end
+    end
+    table.sort(tabs, function(a, b) return a.index < b.index end)
+
+    -- A single tab is the container itself -- an indicator for it says nothing.
+    if #tabs < 2 then
+        frame.personalTabBar:Hide()
+        -- No strip, so the counter takes the left edge on its own.
+        if frame.slotInfoFrame then
+            frame.slotInfoFrame:ClearAllPoints()
+            frame.slotInfoFrame:SetPoint("LEFT", frame, "LEFT", 0, 0)
+        end
+        return
+    end
+
+    local GuildBankFrameModule = ns:GetModule("GuildBankFrame")
+    local ItemButton = ns:GetModule("ItemButton")
+
+    for i, entry in ipairs(tabs) do
+        local button = frame.personalTabs[i]
+        if not button then
+            button = CreateFrame("Button", nil, frame.personalTabBar)
+            button:SetSize(PERSONAL_TAB_SIZE, PERSONAL_TAB_SIZE)
+
+            local icon = button:CreateTexture(nil, "ARTWORK")
+            icon:SetAllPoints()
+            icon:SetTexCoord(0.08, 0.92, 0.08, 0.92)
+            button.icon = icon
+
+            local border = button:CreateTexture(nil, "OVERLAY")
+            border:SetAllPoints()
+            border:SetTexture("Interface\\Buttons\\UI-Quickslot-Depress")
+            border:Hide()
+            button.border = border
+
+            button:SetScript("OnEnter", function(self)
+                self.border:Show()
+                GameTooltip:SetOwner(self, "ANCHOR_TOP")
+                GameTooltip:AddLine(self.tabName or "", 1, 1, 1)
+                GameTooltip:AddLine(string.format("%d/%d", self.used or 0, self.total or 0),
+                    0.8, 0.8, 0.8)
+                GameTooltip:Show()
+                -- Same highlight the guild bank's side tabs use, and the reason
+                -- these are worth having: in a merged grid there is otherwise no
+                -- way to see where one tab ends and the next begins.
+                local gbFrame = GuildBankFrameModule and GuildBankFrameModule:GetFrame()
+                if ItemButton and gbFrame and gbFrame.container and self.tabIndex then
+                    ItemButton:HighlightBagSlots(self.tabIndex, gbFrame.container)
+                end
+            end)
+            button:SetScript("OnLeave", function(self)
+                self.border:Hide()
+                GameTooltip:Hide()
+                local gbFrame = GuildBankFrameModule and GuildBankFrameModule:GetFrame()
+                -- Takes the parent FRAME, not the container: it re-applies search
+                -- filter state rather than blindly resetting alpha, so a hover
+                -- during an active search does not clear the spotlight.
+                if ItemButton and gbFrame then
+                    ItemButton:ClearHighlightedSlots(gbFrame)
+                end
+            end)
+            button:SetScript("OnClick", function(self)
+                -- Scroll, never filter: filtering would undo the merge the whole
+                -- personal view is built on.
+                if GuildBankFrameModule and GuildBankFrameModule.ScrollToTab then
+                    GuildBankFrameModule:ScrollToTab(self.tabIndex)
+                end
+            end)
+
+            frame.personalTabs[i] = button
+        end
+
+        local tabData = entry.data
+        local total = tabData.numSlots or 0
+        button.tabIndex = entry.index
+        button.tabName = tabData.name or string.format("Tab %d", entry.index)
+        button.total = total
+        button.used = total - (tabData.freeSlots or 0)
+        button.icon:SetTexture(tabData.icon or "Interface\\Icons\\INV_Misc_Bag_10")
+
+        button:ClearAllPoints()
+        if i == 1 then
+            button:SetPoint("LEFT", frame.personalTabBar, "LEFT", 0, 0)
+        else
+            button:SetPoint("LEFT", frame.personalTabs[i - 1], "RIGHT", PERSONAL_TAB_SPACING, 0)
+        end
+        button:Show()
+    end
+
+    for i = #tabs + 1, #frame.personalTabs do
+        if frame.personalTabs[i] then frame.personalTabs[i]:Hide() end
+    end
+
+    frame.personalTabBar:SetWidth(
+        (#tabs * PERSONAL_TAB_SIZE) + ((#tabs - 1) * PERSONAL_TAB_SPACING))
+    frame.personalTabBar:Show()
+
+    -- Strip first, then the counter. Re-anchored here rather than at creation
+    -- because the counter's position depends on whether the strip is showing at
+    -- all, and that is only known once the tabs have been counted.
+    frame.personalTabBar:ClearAllPoints()
+    frame.personalTabBar:SetPoint("LEFT", frame, "LEFT", 0, 0)
+    if frame.slotInfoFrame then
+        frame.slotInfoFrame:ClearAllPoints()
+        frame.slotInfoFrame:SetPoint("LEFT", frame.personalTabBar, "RIGHT", 8, 0)
+    end
 end
 
 function GuildBankFooter:GetHeight()
@@ -412,6 +569,10 @@ function GuildBankFooter:Update()
     else
         frame.slotInfo:SetText("0/0")
     end
+
+    -- Owns the counter's anchor as well as its own, so it runs after the text is
+    -- set rather than fighting it.
+    self:UpdatePersonalTabs()
 
     -- Personal bank has neither, and both would re-Show the hidden widgets.
     if personalMode then return end
@@ -1094,6 +1255,14 @@ end
 
 function GuildBankFooter:UpdateMoney()
     if not frame or not frame.moneyText then return end
+    -- Guarded here, not only in Update(). The Personal Bank has no money of its
+    -- own, and any other caller reaching this would write text into a font string
+    -- SetPersonalMode had hidden -- which is how "Available gold" kept surfacing
+    -- under a bank that has none. UpdateButtonStates guards itself the same way.
+    if personalMode then
+        frame.moneyText:SetText("")
+        return
+    end
 
     -- Get guild bank money (if available)
     local guildMoney = GetGuildBankMoney and GetGuildBankMoney() or 0
@@ -1128,6 +1297,21 @@ end
 
 function GuildBankFooter:UpdateWithdrawInfo()
     if not frame then return end
+
+    -- The Personal Bank has no per-rank allowance, so GetGuildBankWithdrawMoney
+    -- reports -1 and this rendered "Available: Unlimited" under a bank with no
+    -- money at all. Both lines stay hidden and empty there.
+    if personalMode then
+        if frame.itemWithdrawInfo then
+            frame.itemWithdrawInfo:SetText("")
+            frame.itemWithdrawInfo:Hide()
+        end
+        if frame.moneyWithdrawInfo then
+            frame.moneyWithdrawInfo:SetText("")
+            frame.moneyWithdrawInfo:Hide()
+        end
+        return
+    end
 
     local scanner = ns:GetModule("GuildBankScanner")
     local isOpen = scanner and scanner:IsGuildBankOpen() or false

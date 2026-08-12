@@ -19,6 +19,15 @@ local addonName, ns = ...
 -- cursor and needs a put-back step -- a failure mode that can strand the cursor
 -- mid-sort, so it is left out until it is worth the risk.
 --
+-- The whole bank is ONE container. Every tab the character owns is planned as a
+-- single virtual slot space, so items pack into tab 1 and overflow into tab 2 and
+-- free space collects at the end. That is the only result consistent with the
+-- window, which renders all tabs merged into one grid -- sorting each tab in
+-- place would leave a hole wherever one tab ended short. Cross-tab moves are
+-- affordable here precisely because this is NOT a real guild bank: the Personal
+-- Bank reports unlimited withdrawals, so moving an item between tabs costs
+-- nothing. In a guild bank it would burn a member's allowance per move.
+--
 -- Shape: scan once -> plan entirely offline -> execute event-driven, which is the
 -- same snapshot/compute/execute split SortEngine uses. See
 -- docs\PERSONAL_BANK_SORT_PLAN.md for the debugging record behind each guard.
@@ -63,9 +72,11 @@ local MOVE_REQUERY_AT = 3
 -- rescanned at most four times a second so items visibly move, and Finish still
 -- does exactly one authoritative refresh at the end.
 local REDRAW_INTERVAL = 0.25
--- Whole-sort ceiling. 98 slots at worst-case ~0.5s each is well inside this;
--- anything slower means something is wrong and the sort should give up.
-local SORT_TIMEOUT = 60
+-- Whole-run ceiling, but SCALED BY TAB COUNT. 98 slots at worst-case ~0.5s each is
+-- well inside 60s; a cross-tab pack is one plan over every tab the character owns,
+-- so the budget has to grow with them or the last items would fail for the crime
+-- of being planned late. state.deadline is set from this once per run.
+local SORT_TIMEOUT_PER_TAB = 60
 -- A failed verification replans from what the tab actually looks like now instead
 -- of abandoning it half sorted. Once: a second failure means the disagreement is
 -- not transient, and continuing would move items against a layout we no longer
@@ -87,7 +98,12 @@ local stepping = false  -- true only inside StepMove; see Advance()
 --- GudaBags_Diag when the sort ends, where a /reload writes them to
 --- SavedVariables and they can be read off disk.
 local sortLog = {}
-local SORT_LOG_MAX = 300   -- a 98-slot sort logs far less; this is a runaway guard
+-- A runaway guard, not a budget. One tab logs ~2 lines per move plus a header, so
+-- a measured 30-move run used 63 -- but a run now covers every tab the character
+-- owns, and at 300 a heavy multi-tab sort truncated exactly at the tail, losing
+-- the `finished:` line that every diagnosis in docs\PERSONAL_BANK_SORT_PLAN.md
+-- section 3 starts from.
+local SORT_LOG_MAX = 1000
 
 local function trace(...)
     ns:Debug(...)
@@ -147,15 +163,16 @@ end
 -- Tab resolution
 -------------------------------------------------
 
---- Which tab to sort.
+--- A single tab, derived from the client.
 ---
---- Derived rather than asserted. The Personal Bank is presented as a single tab
---- and the addon pins the selection to 1 in several places -- but this client
---- reports THREE tabs for it (Data\GuildBankScanner.lua GetScanTabs), and a
---- "Personal Bank Tab Voucher" item exists, so "1" is a fact about today's
---- layout, not about the API. Reading the current tab is what keeps the plan and
---- the PickupGuildBankItem calls addressing the same container. Bagnon does the
---- same (components\sortBtn.lua) and refuses to sort when it is 0.
+--- No longer the sort's entry point: SortPersonalBank takes the whole tab list
+--- from GuildBankScanner:GetScanTabs(), the same source the view renders from.
+--- This survives as (a) DryRun's default and (b) the fallback for the window
+--- before tab data has landed and GetScanTabs still reports nothing.
+---
+--- Note the Personal Bank is now rendered merged, so GetSelectedTab() is 0 there
+--- and only the GetCurrentGuildBankTab() branch can answer. Bagnon derives it the
+--- same way (components\sortBtn.lua) and refuses to sort when it is 0.
 local function ResolveTab()
     local tab = GetCurrentGuildBankTab and GetCurrentGuildBankTab()
     if type(tab) ~= "number" or tab < 1 then
@@ -169,32 +186,53 @@ end
 -- Planning (offline -- no API calls)
 -------------------------------------------------
 
---- Snapshot of one tab, built from the scanner's cache. Callers rescan first, so
---- the cache is the fresh single source of truth rather than a second, parallel
---- live-read path.
+--- Snapshot of EVERY tab as one flat virtual slot space, built from the scanner's
+--- cache. Callers rescan first, so the cache is the fresh single source of truth
+--- rather than a second, parallel live-read path.
+---
+--- The virtual space is what makes cross-tab packing fall out for free: position
+--- p is simply the p'th slot of the bank read tab by tab, so "pack toward slot 1"
+--- and "pack toward the front of tab 1, overflowing into tab 2" are the same
+--- statement. items[p].tab / .slot is the PHYSICAL address of position p and is
+--- never mutated -- PlanMoves moves items between positions and looks their
+--- addresses up here.
+---
+--- Tabs are walked in ascending index (the caller's list is sorted), so tab 1
+--- fills first. A tab missing from the cache is skipped rather than treated as 98
+--- empty slots, which would make the planner hand items to slots that may not
+--- exist.
 ---
 --- Note tabData.slots is SPARSE -- keyed by slot index, empty slots absent -- so
 --- it must be indexed, never walked with ipairs or measured with #.
-local function BuildSnapshot(tabIndex)
-    local tabData = GuildBankScanner and GuildBankScanner:GetCachedTab(tabIndex)
-    if not tabData then return nil end
+local function BuildSnapshot(tabs)
+    if not GuildBankScanner or not tabs or #tabs == 0 then return nil end
 
-    local numSlots = tabData.numSlots or GuildBankScanner:GetSlotsPerTab()
     local items = {}
-    for slot = 1, numSlots do
-        local d = tabData.slots and tabData.slots[slot]
-        items[#items + 1] = {
-            slot = slot,
-            itemID = d and d.itemID or nil,
-            name = d and d.name or "",
-            quality = d and d.quality or 0,
-            itemLevel = d and d.itemLevel or 0,
-            classID = d and d.classID or 15,
-            subClassID = d and (d.subClassID or d.subclassID) or 0,
-            count = d and d.count or 0,
-            locked = d and d.locked or false,
-        }
+    local seen = 0
+    for _, tabIndex in ipairs(tabs) do
+        local tabData = GuildBankScanner:GetCachedTab(tabIndex)
+        if tabData then
+            seen = seen + 1
+            local numSlots = tabData.numSlots or GuildBankScanner:GetSlotsPerTab()
+            for slot = 1, numSlots do
+                local d = tabData.slots and tabData.slots[slot]
+                items[#items + 1] = {
+                    tab = tabIndex,
+                    slot = slot,
+                    itemID = d and d.itemID or nil,
+                    name = d and d.name or "",
+                    quality = d and d.quality or 0,
+                    itemLevel = d and d.itemLevel or 0,
+                    classID = d and d.classID or 15,
+                    subClassID = d and (d.subClassID or d.subclassID) or 0,
+                    count = d and d.count or 0,
+                    locked = d and d.locked or false,
+                }
+            end
+        end
     end
+
+    if seen == 0 then return nil end
     return items
 end
 
@@ -213,38 +251,48 @@ end
 --- region, which frees the slot the next item was waiting for. Costs one extra
 --- move per cycle and never needs an exchange.
 ---
---- Terminates: a placed item is never moved again (only entries whose slot differs
---- from their rank are considered), and a park always unblocks at least one item
---- on the following pass.
+--- Terminates: a placed item is never moved again (only entries whose position
+--- differs from their rank are considered), and a park always unblocks at least
+--- one item on the following pass.
+---
+--- Works in VIRTUAL positions (see BuildSnapshot), so it is unchanged by there
+--- being more than one tab: rank 1 is the first slot of the first tab, and items
+--- overflow into tab 2 exactly when tab 1 runs out. entry.pos is where an item
+--- currently sits; items[pos].tab / .slot is that position's physical address.
 local function PlanMoves(items)
     currentSortPriority = Database:GetSetting("sortPriority") or "default"
 
     local numSlots = #items
 
     -- Occupied entries in the order they should end up, so an entry's rank IS its
-    -- target slot: rank 1 goes to slot 1, and items pack toward the front.
+    -- target position: rank 1 goes to position 1, and items pack toward the front.
     local order = {}
-    local occupant = {}   -- slot -> entry; the model of the tab, mutated as we plan
+    local occupant = {}   -- pos -> entry; the model of the bank, mutated as we plan
     for i = 1, numSlots do
         local entry = items[i]
+        entry.pos = i
         if entry.itemID then
             order[#order + 1] = entry
-            occupant[entry.slot] = entry
+            occupant[i] = entry
         end
     end
     table.sort(order, CompareItems)
 
     local moves = {}
     local function record(entry, to)
+        local src = items[entry.pos]
+        local dst = items[to]
         moves[#moves + 1] = {
-            srcSlot = entry.slot,
-            dstSlot = to,
+            srcTab = src.tab,
+            srcSlot = src.slot,
+            dstTab = dst.tab,
+            dstSlot = dst.slot,
             itemID = entry.itemID,
             count = entry.count,
         }
-        occupant[entry.slot] = nil
+        occupant[entry.pos] = nil
         occupant[to] = entry
-        entry.slot = to
+        entry.pos = to
     end
 
     -- Hard stop. The loop is proven to terminate above; this only keeps a future
@@ -257,7 +305,7 @@ local function PlanMoves(items)
         local progressed = false
         for rank = 1, #order do
             local entry = order[rank]
-            if entry.slot ~= rank and occupant[rank] == nil then
+            if entry.pos ~= rank and occupant[rank] == nil then
                 record(entry, rank)
                 progressed = true
             end
@@ -267,15 +315,15 @@ local function PlanMoves(items)
         else
             local stuck = nil
             for rank = 1, #order do
-                if order[rank].slot ~= rank then stuck = order[rank]; break end
+                if order[rank].pos ~= rank then stuck = order[rank]; break end
             end
             if not stuck then break end   -- everything is where it belongs
 
-            -- Park outside the packed region (slot > #order) so the parking spot
+            -- Park outside the packed region (pos > #order) so the parking spot
             -- can never be somebody's target and create a new cycle.
             local spare = nil
-            for slot = numSlots, #order + 1, -1 do
-                if occupant[slot] == nil then spare = slot; break end
+            for pos = numSlots, #order + 1, -1 do
+                if occupant[pos] == nil then spare = pos; break end
             end
             if not spare then
                 trace("GuildBankSort: no free slot to break a cycle, stopping with",
@@ -335,6 +383,11 @@ local function Finish(reason)
     local total = state.planned
     local lockEvents = state.lockEvents
     local elapsed = GetTime() - state.startedAt
+    -- Captured BEFORE state is dropped. The refresh below used to resolve its own
+    -- tab list after this line and could therefore refresh a different set than
+    -- the run touched -- harmless while there was only ever tab 1, a stale grid
+    -- as soon as there is more than one.
+    local touched = state.tabs
     state = nil
 
     if ClearCursor then ClearCursor() end
@@ -348,12 +401,31 @@ local function Finish(reason)
     -- server never told us the swap landed, and the driver -- not the plan -- is
     -- what needs changing.
     trace("GuildBankSort finished:", reason, "moved", moved, "of", total,
-        "in", string.format("%.1fs", elapsed), "|", lockEvents, "lock events")
+        "in", string.format("%.1fs", elapsed), "|", lockEvents, "lock events",
+        "|", touched and #touched or 0, "tabs")
 
     -- One query + scan + refresh for the whole sort, instead of the per-move
-    -- rescan the lock event would otherwise have triggered.
+    -- rescan the lock event would otherwise have triggered. ScanAllTabs queries
+    -- as well as scans, which is what makes this read authoritative -- a bare
+    -- ScanTab loop would skip the query.
     if GuildBankScanner and GuildBankScanner:IsGuildBankOpen() then
         GuildBankScanner:ScanAllTabs()
+        -- Belt and braces for the fallback path: SortPersonalBank can fall back
+        -- to ResolveTab(), which may name a tab outside the displayed set that
+        -- ScanAllTabs just covered. Three lookups and no work on the normal path.
+        if touched then
+            for i = 1, #touched do
+                if not GuildBankScanner:GetCachedTab(touched[i]) then
+                    GuildBankScanner:ScanTab(touched[i])
+                end
+            end
+            -- Put the client's active tab back where the session started it.
+            -- EnsureCurrentTab moves it as the plan crosses tabs, and
+            -- drag-and-drop after a sort must behave as it did before one.
+            if touched[1] and GuildBankScanner.SetCurrentTab then
+                GuildBankScanner:SetCurrentTab(touched[1])
+            end
+        end
     end
     if ns.OnGuildBankUpdated then
         ns.OnGuildBankUpdated()
@@ -372,23 +444,56 @@ end
 --- that merely happens to match. Every destination is empty before its move (see
 --- PlanMoves), so item+count appearing there can only be ours.
 local function MoveLanded(move)
-    local itemID, count = LiveSlot(state.tab, move.dstSlot)
+    local itemID, count = LiveSlot(move.dstTab, move.dstSlot)
     return itemID == move.itemID and count == move.count
 end
 
---- Show the tab catching up, without paying for a rescan per move.
+--- Mark a tab as needing a redraw. A cross-tab move dirties two of them.
+local function MarkDirty(tab)
+    if not state or not tab then return end
+    state.dirty = state.dirty or {}
+    state.dirty[tab] = true
+end
+
+--- Show the bank catching up, without paying for a rescan per move.
+---
+--- Only the tabs actually touched since the last redraw are rescanned. Sweeping
+--- every tab four times a second would be 98 slot reads per tab per pass for the
+--- whole run, and a move can only ever change the two tabs it names.
 local function Redraw()
     if not state then return end
     local now = GetTime()
     if now - (state.lastRedraw or 0) < REDRAW_INTERVAL then return end
+    if not state.dirty or not next(state.dirty) then return end
     state.lastRedraw = now
 
+    local dirty = state.dirty
+    state.dirty = {}
+
     if GuildBankScanner and GuildBankScanner:IsGuildBankOpen() then
-        GuildBankScanner:ScanTab(state.tab)
+        for tab in pairs(dirty) do
+            GuildBankScanner:ScanTab(tab)
+        end
     end
     if ns.OnGuildBankUpdated then
-        ns.OnGuildBankUpdated()
+        -- Named, not nil: passing nothing makes IncrementalUpdate walk every
+        -- cached tab, and only these can have changed.
+        ns.OnGuildBankUpdated(dirty)
     end
+end
+
+--- Hand control back to the driver on the NEXT frame.
+---
+--- Both Advance and the run start reach this from inside StepMove -- where
+--- `stepping` is true and a synchronous StepMove() would return instantly,
+--- leaving the run stalled with no pending timer -- or from the lock dispatch,
+--- where re-entering before the pickup is issued leaks a timer. One deferred
+--- call per completed move, never a ticker (RULES rule 2).
+local function Resume()
+    local mine = state
+    C_Timer.After(0, function()
+        if state == mine then StepMove() end
+    end)
 end
 
 --- Advance past a completed move.
@@ -401,26 +506,30 @@ local function Advance()
     -- Off the event dispatch, deliberately. StepMove issues PickupGuildBankItem,
     -- which itself changes lock state; called inline from the lock handler it can
     -- re-enter this path before the second pickup has been issued, leaving an
-    -- orphaned timer and a pickup onto a loaded cursor. C_Timer.After(0) lands it
-    -- on the next frame -- which is where Bagnon's driver runs it too. Not a
-    -- ticker: exactly one deferred call per completed move (RULES rule 2).
-    local mine = state
-    C_Timer.After(0, function()
-        if state == mine then StepMove() end
-    end)
+    -- orphaned timer and a pickup onto a loaded cursor. Resume() lands it on the
+    -- next frame -- which is where Bagnon's driver runs it too.
+    Resume()
 end
 
---- Rebuild the plan from what the tab looks like now. Returns "continue" when
+--- Rescan every tab and rebuild the snapshot. One pass over the whole bank, on a
+--- path taken only when the plan and the bank have already disagreed once.
+local function RescanAll()
+    if GuildBankScanner and GuildBankScanner:IsGuildBankOpen() then
+        for _, tab in ipairs(state.tabs) do
+            GuildBankScanner:ScanTab(tab)
+        end
+    end
+    return BuildSnapshot(state.tabs)
+end
+
+--- Rebuild the plan from what the bank looks like now. Returns "continue" when
 --- there is more to do, "sorted" when nothing is left, nil when we are out of
 --- retries or the data is unusable.
 local function Replan()
     if state.replans >= MAX_REPLANS then return nil end
     state.replans = state.replans + 1
 
-    if GuildBankScanner and GuildBankScanner:IsGuildBankOpen() then
-        GuildBankScanner:ScanTab(state.tab)
-    end
-    local items = BuildSnapshot(state.tab)
+    local items = RescanAll()
     if not items then return nil end
 
     local moves = PlanMoves(items)
@@ -430,6 +539,23 @@ local function Replan()
     state.index = 1
     state.planned = state.planned + #moves
     return "continue"
+end
+
+--- Make a tab the client's active one, but only when it is not already.
+---
+--- Blizzard's UI set this whenever a tab was selected; with that UI gone nothing
+--- else does, and a pickup addressed at a tab the server does not consider active
+--- is the failure chased in docs\PERSONAL_BANK_SORT_PLAN.md section 1. Tracked in
+--- state so a run that stays within one tab issues exactly one of these.
+---
+--- Goes through the scanner's viewable-gated setter, NOT SetSelectedTab -- that
+--- one fires a callback that re-renders the whole merged grid.
+local function EnsureCurrentTab(tab)
+    if not tab or state.currentTab == tab then return end
+    if GuildBankScanner and GuildBankScanner.SetCurrentTab then
+        GuildBankScanner:SetCurrentTab(tab)
+    end
+    state.currentTab = tab
 end
 
 local OnMoveTimeout   -- forward declaration; assigned below
@@ -468,10 +594,10 @@ local function DoDrop()
     if not move.probed then
         move.probed = true
         local cursorType, cursorItemID = GetCursorInfo and GetCursorInfo()
-        trace("GuildBankSort: after pickup src", move.srcSlot,
+        trace("GuildBankSort: after pickup src", move.srcTab .. ":" .. move.srcSlot,
             "| cursorHasItem", tostring(CursorHasItem() and true or false),
             "| cursorInfo", tostring(cursorType), tostring(cursorItemID),
-            "| srcNowHolds", tostring(LiveSlot(state.tab, move.srcSlot)),
+            "| srcNowHolds", tostring(LiveSlot(move.srcTab, move.srcSlot)),
             "expected", tostring(move.itemID))
     end
 
@@ -508,9 +634,17 @@ local function DoDrop()
     move.issued = true
     move.waits = 0   -- the landing budget is separate from the pickup budget
 
-    PickupGuildBankItem(state.tab, move.dstSlot)
-    trace("GuildBankSort: move", state.index, "dropped", move.srcSlot, "->", move.dstSlot,
+    PickupGuildBankItem(move.dstTab, move.dstSlot)
+    -- Both tabs, always: a cross-tab move is the interesting case and "26 -> 1"
+    -- alone cannot tell it from an in-tab one.
+    trace("GuildBankSort: move", state.index,
+        "dropped", move.srcTab .. ":" .. move.srcSlot,
+        "->", move.dstTab .. ":" .. move.dstSlot,
         "id", tostring(move.itemID), "x", tostring(move.count))
+
+    -- Both ends changed; Redraw rescans only what it is told about.
+    MarkDirty(move.srcTab)
+    MarkDirty(move.dstTab)
 
     -- The move is in flight. The lock event will fire but will not confirm it (see
     -- MOVE_CHECKS), so these timed re-checks are what actually land the move, and
@@ -541,9 +675,13 @@ local function OnMoveEvent()
     -- Ignored while StepMove is mid-swap: the pickup has not been issued yet, so
     -- nothing this handler could conclude would be true. The deferred check picks
     -- the move up a frame later.
-    if not state or stepping then return end
+    -- The state.moves check is belt and braces: the plan exists before the run
+    -- starts, but an event arriving against a half-built state is exactly the
+    -- kind of thing that indexes a nil table, and it costs nothing.
+    if not state or stepping or not state.moves then return end
     local move = state.moves[state.index]
     if not move then
+        trace("GuildBankSort: all moves issued")
         Finish("done")
         return
     end
@@ -568,13 +706,14 @@ OnMoveTimeout = function()
     if not state then return end
     state.timer = nil
 
-    if GetTime() - state.startedAt > SORT_TIMEOUT then
+    if GetTime() > state.deadline then
         Finish("sort timeout")
         return
     end
 
     local move = state.moves[state.index]
     if not move then
+        trace("GuildBankSort: all moves issued")
         Finish("done")
         return
     end
@@ -627,15 +766,17 @@ OnMoveTimeout = function()
         -- pre-move link forever and every move would "fail".
         if move.waits == MOVE_REQUERY_AT and GuildBankScanner and GuildBankScanner.RequeryTab then
             trace("GuildBankSort: move", state.index, "still not landed, requerying tab")
-            GuildBankScanner:RequeryTab(state.tab)
+            GuildBankScanner:RequeryTab(move.dstTab)
         end
         state.timer = C_Timer.NewTimer(nextCheck, OnMoveTimeout)
         return
     end
 
-    trace("GuildBankSort: move", state.index, "src", move.srcSlot, "dst", move.dstSlot,
+    trace("GuildBankSort: move", state.index,
+        "src", move.srcTab .. ":" .. move.srcSlot,
+        "dst", move.dstTab .. ":" .. move.dstSlot,
         "expected", tostring(move.itemID), "x", tostring(move.count),
-        "got", tostring(GetGuildBankItemLink(state.tab, move.dstSlot)),
+        "got", tostring(GetGuildBankItemLink(move.dstTab, move.dstSlot)),
         "cursor", CursorLoaded() and "held" or "empty")
 
     local outcome = Replan()
@@ -644,7 +785,8 @@ OnMoveTimeout = function()
         StepMove()
         return
     elseif outcome == "sorted" then
-        Finish("done after replan")
+        trace("GuildBankSort: nothing left after replan")
+        Finish("done")
         return
     end
 
@@ -656,7 +798,9 @@ end
 local function DoStep()
     if not state then return end
 
-    if GetTime() - state.startedAt > SORT_TIMEOUT then
+    -- Per tab, not per run. The budget is a statement about one ~98-slot tab, and
+    -- a run now covers every tab the character owns.
+    if GetTime() > state.deadline then
         Finish("sort timeout")
         return
     end
@@ -671,6 +815,7 @@ local function DoStep()
 
     local move = state.moves[state.index]
     if not move then
+        trace("GuildBankSort: all moves issued")
         Finish("done")
         return
     end
@@ -687,8 +832,8 @@ local function DoStep()
     -- Lock state read live, not from the plan. The cached flag is whatever the
     -- last scan saw, which is both stale enough to miss a slot that is locked now
     -- and sticky enough to block a slot that was unlocked long ago.
-    local _, _, srcLocked = LiveSlot(state.tab, move.srcSlot)
-    local _, _, dstLocked = LiveSlot(state.tab, move.dstSlot)
+    local _, _, srcLocked = LiveSlot(move.srcTab, move.srcSlot)
+    local _, _, dstLocked = LiveSlot(move.dstTab, move.dstSlot)
     if srcLocked or dstLocked then
         state.timer = C_Timer.NewTimer(MOVE_TIMEOUT, OnMoveTimeout)
         return
@@ -709,9 +854,16 @@ local function DoStep()
     -- Flag before the call, for the same reason the drop does -- see
     -- CheckCursorAndDrop. `stepping` already covers this path, but relying on two
     -- guards where one ordering would do is how the drop loop happened.
+    -- Make the source tab current before lifting from it. Both halves address
+    -- their tab explicitly, so this should be redundant -- but the current tab
+    -- being unset is the documented cause of moves silently not registering
+    -- (section 1), and the pickup is the half that reads from a tab. Skipped when
+    -- it is already current, so an in-tab run issues one call for the whole plan.
+    EnsureCurrentTab(move.srcTab)
+
     move.pickedUp = true
     move.waits = 0
-    PickupGuildBankItem(state.tab, move.srcSlot)
+    PickupGuildBankItem(move.srcTab, move.srcSlot)
 
     -- NO same-frame CursorHasItem() check here. It reads false on this client even
     -- for a pickup that is working, and asserting on it aborted every sort on its
@@ -746,22 +898,48 @@ end
 --- Plan only -- moves nothing, changes nothing. Exists for /guda diag gbsort, so
 --- "the sort does nothing" can be told apart from "the plan is empty" without
 --- touching a single item.
+---
+--- Accepts a single tab index or a list. With neither it plans the whole bank,
+--- exactly as a real sort would.
 function GuildBankSort:DryRun(tabIndex)
     if not GuildBankScanner then
         GuildBankScanner = ns:GetModule("GuildBankScanner")
     end
     if not GuildBankScanner then return nil end
 
-    local tab = tabIndex or ResolveTab()
-    if not tab then return nil end
+    local tabs
+    if type(tabIndex) == "table" then
+        tabs = tabIndex
+    elseif tabIndex then
+        tabs = { tabIndex }
+    else
+        tabs = GuildBankScanner:GetScanTabs()
+        if not tabs or #tabs == 0 then
+            local tab = ResolveTab()
+            if not tab then return nil end
+            tabs = { tab }
+        end
+    end
 
-    local items = BuildSnapshot(tab)
+    local items = BuildSnapshot(tabs)
     if not items then return nil end
-    return PlanMoves(items), tab
+    return PlanMoves(items), tabs
 end
 
---- Sort the Personal Bank's tab. Returns false (and says why in the trace) when
---- the preconditions aren't met, so the caller can leave the button enabled.
+--- Sort the whole Personal Bank as ONE container, packing across tabs.
+---
+--- Items fill the first tab and overflow into the next, so free space collects at
+--- the end -- which is the only result consistent with the window presenting every
+--- tab merged into one grid. Sorting each tab in place instead would leave a hole
+--- wherever one tab ended short, in a container that claims to be continuous.
+---
+--- Cross-tab moves are safe here in a way they would not be in a real guild bank:
+--- the Personal Bank reports unlimited withdrawals, so a move costs no allowance.
+--- Every move still targets an EMPTY slot (see PlanMoves) -- this bank refuses
+--- drops onto occupied ones regardless of which tab they are in.
+---
+--- Returns false (and says why in the trace) when the preconditions aren't met or
+--- nothing needed sorting, so the caller can leave the button enabled.
 function GuildBankSort:SortPersonalBank()
     -- Point the saved variable at this run's log before anything can bail, so even
     -- a refused sort leaves its reason on disk after a /reload. trace() appends to
@@ -801,22 +979,34 @@ function GuildBankSort:SortPersonalBank()
         return false
     end
 
-    local tab = ResolveTab()
-    if not tab then
-        trace("GuildBankSort: no current tab")
-        return false
+    -- Every tab the character owns, from the same source the view renders from,
+    -- so the sorter and the grid can never disagree about which tabs exist.
+    local tabs = GuildBankScanner:GetScanTabs()
+    if not tabs or #tabs == 0 then
+        -- Tab data has not landed yet. Fall back to the single-tab resolution
+        -- that predates multi-tab support rather than refusing outright.
+        local tab = ResolveTab()
+        if not tab then
+            trace("GuildBankSort: no current tab")
+            return false
+        end
+        tabs = { tab }
     end
 
-    -- Plan against what the tab holds NOW. The cache is refreshed on a debounce
+    -- Plan against what the bank holds NOW. The cache is refreshed on a debounce
     -- and can be several seconds behind a manual drag, and every move.itemID in a
-    -- plan built from stale data addresses the wrong slot. One 98-slot pass on an
+    -- plan built from stale data addresses the wrong slot. One pass per tab on an
     -- explicit click, the same single-scan-then-compute-offline shape SortEngine
     -- uses.
-    GuildBankScanner:ScanTab(tab)
+    if GuildBankScanner:IsGuildBankOpen() then
+        for _, tab in ipairs(tabs) do
+            GuildBankScanner:ScanTab(tab)
+        end
+    end
 
-    local items = BuildSnapshot(tab)
+    local items = BuildSnapshot(tabs)
     if not items then
-        trace("GuildBankSort: no cached data for tab", tab)
+        trace("GuildBankSort: no cached data for tabs", table.concat(tabs, ", "))
         return false
     end
 
@@ -833,7 +1023,13 @@ function GuildBankSort:SortPersonalBank()
     dropping = false
 
     state = {
-        tab = tab,
+        -- The tabs this run owns. One plan spans all of them -- moves carry their
+        -- own srcTab/dstTab, so items pack across tab boundaries into whatever
+        -- free slot comes first.
+        tabs = tabs,
+        -- Which tab the client currently considers active; see EnsureCurrentTab.
+        currentTab = nil,
+        dirty = {},
         moves = moves,
         index = 1,
         completed = 0,
@@ -842,6 +1038,7 @@ function GuildBankSort:SortPersonalBank()
         lockEvents = 0,
         lastRedraw = 0,
         startedAt = GetTime(),
+        deadline = GetTime() + (SORT_TIMEOUT_PER_TAB * #tabs),
         timer = nil,
     }
 
@@ -854,7 +1051,8 @@ function GuildBankSort:SortPersonalBank()
         GuildBankHeader:SetSortEnabled(false)
     end
 
-    trace("GuildBankSort: starting", #moves, "moves on tab", tab)
+    trace("GuildBankSort: starting", #moves, "moves across", #tabs,
+        "tabs:", table.concat(tabs, ", "))
     StepMove()
     return true
 end

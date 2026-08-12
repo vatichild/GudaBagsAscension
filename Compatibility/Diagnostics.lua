@@ -1587,24 +1587,50 @@ local function DumpGuildBankSort()
             tab, tostring(tabData.numSlots), tostring(tabData.freeSlots), occupied)
     end
 
-    -- 4. Live tab, read straight from the client with the same two calls the
-    -- sorter verifies moves with.
-    local liveOccupied, liveShown = 0, 0
-    for slot = 1, slotsPerTab do
-        local okInfo, texture, count, locked = pcall(GetGuildBankItemInfo, tab, slot)
-        local okLink, link = pcall(GetGuildBankItemLink, tab, slot)
-        if okInfo and texture then
-            liveOccupied = liveOccupied + 1
-            if liveShown < 10 then
-                liveShown = liveShown + 1
-                local itemID = okLink and link and tostring(link):match("item:(%d+)") or "nil"
-                line("  live   %3d: id=%s x%s locked=%s link=%s",
-                    slot, itemID, tostring(count), tostring(locked),
-                    okLink and tostring(link) or "err")
+    -- 4. Live read, straight from the client with the same two calls the sorter
+    -- verifies moves with -- for EVERY tab the client reports, not just the one
+    -- the sort would target.
+    --
+    -- This is the measurement that separates the two ways a second Personal Bank
+    -- tab can come up empty. If a tab reads occupied here but its cached entry is
+    -- empty, the client HAS the data and our scan simply ran too early. If it
+    -- reads 0 live as well, the server never sent that tab's contents at all --
+    -- in which case QueryGuildBankTab alone is not enough for a non-current tab
+    -- and it has to be made current first.
+    local okList, scanList = pcall(GuildBankScanner.GetScanTabs, GuildBankScanner)
+    line("scan list: %s",
+        (okList and type(scanList) == "table") and table.concat(scanList, ", ") or "n/a")
+
+    for i = 1, numTabs do
+        local liveOccupied, liveShown = 0, 0
+        for slot = 1, slotsPerTab do
+            local okInfo, texture, count, locked = pcall(GetGuildBankItemInfo, i, slot)
+            local okLink, link = pcall(GetGuildBankItemLink, i, slot)
+            if okInfo and texture then
+                liveOccupied = liveOccupied + 1
+                if liveShown < 5 then
+                    liveShown = liveShown + 1
+                    local itemID = okLink and link and tostring(link):match("item:(%d+)") or "nil"
+                    line("  live %d/%3d: id=%s x%s locked=%s link=%s",
+                        i, slot, itemID, tostring(count), tostring(locked),
+                        okLink and tostring(link) or "err")
+                end
             end
         end
+
+        -- Paired with the cache for the same tab, because the divergence is the
+        -- whole point: live > cached means we scanned before the reply landed.
+        local okC, cached = pcall(GuildBankScanner.GetCachedTab, GuildBankScanner, i)
+        local cachedOccupied = "ABSENT"
+        if okC and cached then
+            local n = 0
+            for _ in pairs(cached.slots or {}) do n = n + 1 end
+            cachedOccupied = tostring(n)
+        end
+        line("live tab %d: occupied=%d of %d | cached occupied=%s | name=%s",
+            i, liveOccupied, slotsPerTab, cachedOccupied,
+            tostring((GetGuildBankTabInfo(i))))
     end
-    line("live tab %d: occupied=%d of %d", tab, liveOccupied, slotsPerTab)
 
     -- 5. The plan itself. Zero moves against a non-empty tab is the 'already
     -- sorted' bail, and says the comparator -- not the mover -- is the problem.
@@ -1615,21 +1641,30 @@ local function DumpGuildBankSort()
     local Database = ns:GetModule("Database")
     line("sortPriority=%s", Database and safeCall(Database.GetSetting, Database, "sortPriority") or "n/a")
 
+    -- No tab argument: plan the whole bank across every tab, which is what a real
+    -- sort does now. Moves are printed as tab:slot -- a cross-tab move is the
+    -- interesting one and bare slot numbers cannot show it.
     local function reportPlan(label)
-        local ok, moves = pcall(GuildBankSort.DryRun, GuildBankSort, tab)
+        local ok, moves = pcall(GuildBankSort.DryRun, GuildBankSort)
         if not ok then
             line("%s plan: errored: %s", label, tostring(moves))
             return
         end
         if not moves then
-            line("%s plan: nothing -- no snapshot for tab %d", label, tab)
+            line("%s plan: nothing -- no snapshot", label)
             return
         end
-        line("%s plan: %d moves", label, #moves)
-        for i = 1, math.min(10, #moves) do
+        local crossTab = 0
+        for i = 1, #moves do
+            if moves[i].srcTab ~= moves[i].dstTab then crossTab = crossTab + 1 end
+        end
+        line("%s plan: %d moves (%d cross-tab)", label, #moves, crossTab)
+        for i = 1, math.min(15, #moves) do
             local m = moves[i]
-            line("  move %2d: slot %d -> %d (id=%s x%s)",
-                i, m.srcSlot, m.dstSlot, tostring(m.itemID), tostring(m.count))
+            line("  move %2d: %s:%s -> %s:%s (id=%s x%s)",
+                i, tostring(m.srcTab), tostring(m.srcSlot),
+                tostring(m.dstTab), tostring(m.dstSlot),
+                tostring(m.itemID), tostring(m.count))
         end
     end
 
