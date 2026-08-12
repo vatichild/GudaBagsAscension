@@ -55,8 +55,12 @@ local guildBankLastRenderSig = nil
 --
 -- The Personal Bank is the guild bank system reused server-side, so it arrives
 -- through this window (see Data\GuildBankScanner.lua for how the two are told
--- apart). It has one tab, no money, no deposit/withdraw rights and no log, so
--- personal mode strips the guild chrome and renders the plain bank-style grid.
+-- apart). It has no money, no deposit/withdraw rights and no log, so personal
+-- mode strips the guild chrome and renders the plain bank-style grid.
+--
+-- It may own more than one tab (a "Personal Bank Tab Voucher" item exists), and
+-- they are rendered MERGED into one continuous grid rather than behind a tab
+-- strip -- the same presentation the bag window gives five bags.
 --
 -- personalBrowse is the offline case: no session is open, so there is no session
 -- kind to read and the flag states it instead.
@@ -89,6 +93,13 @@ end
 local function ComputeGuildBankRenderSig()
     local selectedTab = (GuildBankScanner and GuildBankScanner:GetSelectedTab()) or 0
     local numTabs = (GuildBankScanner and GuildBankScanner:GetNumTabs()) or 0
+    -- How many tabs the render will actually walk. numTabs alone is not enough
+    -- for the Personal Bank: selectedTab is now always 0 there, and GetNumTabs
+    -- reads 0 while the frame is hidden -- which is precisely when CanFastReopen
+    -- consults this. Without it, a tab bought while away would be reconciled
+    -- slot-by-slot onto a layout that has no buttons for it. CountCachedTabs is
+    -- <= 6 iterations and runs twice per open.
+    local cachedTabs = (GuildBankScanner and GuildBankScanner:CountCachedTabs()) or 0
     -- Bank kind and view mode are part of the layout, not just the chrome: a
     -- one-tab guild bank and the Personal Bank would otherwise share a signature
     -- and the fast reopen would hand one bank the other's layout. The view mode
@@ -97,7 +108,8 @@ local function ComputeGuildBankRenderSig()
     if mode == "p" and Database:GetSetting("bankViewType") == "category" then
         mode = "pc"
     end
-    return tostring(selectedTab) .. ":" .. tostring(numTabs) .. ":" .. mode
+    return tostring(selectedTab) .. ":" .. tostring(numTabs)
+        .. "/" .. tostring(cachedTabs) .. ":" .. mode
 end
 
 -- Progressive ("All Tabs" can be ~588 buttons) rendering. Refresh places the
@@ -1172,8 +1184,14 @@ local function FinishRender(st)
     end
 
     -- Update footer. Counts only the tab actually on screen when one is
-    -- selected -- the Personal Bank always shows tab 1, and summing every tab
-    -- the server reports would put "x/294" under a 98-slot view.
+    -- selected; with no selection (0) it sums every cached tab, which is what
+    -- the merged Personal Bank view wants -- every cached tab is a shown tab
+    -- there, so the counter reports the true total across all of them.
+    --
+    -- Note GuildBankFooter:Update() on the next line re-derives the same string
+    -- from GetTotalSlots() (all cached tabs) and overwrites this, so the
+    -- tab-scoped branch is currently inert. Left alone: making it win would
+    -- change a visible number on the guild bank, which is not this change's job.
     local totalSlots = 0
     local freeSlots = 0
     local countedTab = st.selectedTab or 0
@@ -1375,18 +1393,25 @@ function GuildBankFrame:Refresh()
     local columns = Database:GetSetting("guildBankColumns")
     local hasSearch = SearchBar:HasActiveFilters(frame)
     local selectedTab = GuildBankScanner and GuildBankScanner:GetSelectedTab() or 0
-    -- The Personal Bank is presented as one container: always tab 1, never the
-    -- merged all-tabs view, and with no strip to switch away from it. Pinned
-    -- here rather than through SetSelectedTab so it cannot leak into the guild
-    -- bank's own tab selection (that setter also fires a refresh callback).
+    -- The Personal Bank is presented as ONE container spanning every tab the
+    -- character owns -- the same way the bag window merges five bags. 0 is the
+    -- existing "no tab filter" value, so both gather loops below need no special
+    -- case: their `selectedTab > 0` tests simply stop dropping tabs.
+    --
+    -- Pinned here rather than through SetSelectedTab so it cannot leak into the
+    -- guild bank's own tab selection (that setter also fires a refresh callback).
     if isPersonal then
-        selectedTab = 1
+        selectedTab = 0
     end
 
     -- Collect all slots from guild bank
     ns:ProfileStart("gb.gather")
     local allSlots = {}
-    local showTabSections = selectedTab == 0 and GuildBankScanner and GuildBankScanner:GetNumTabs() > 1
+    -- No per-tab headers for the Personal Bank. It reads as one container, and a
+    -- labelled band per tab is the tab strip in another form -- which is exactly
+    -- what the merged presentation is meant to avoid. Guild bank keeps them.
+    local showTabSections = selectedTab == 0 and not isPersonal
+        and GuildBankScanner and GuildBankScanner:GetNumTabs() > 1
 
     -- Sort tabs by index
     local sortedTabs = {}
@@ -1898,6 +1923,32 @@ function GuildBankFrame:TogglePersonal()
     frame:Show()
 end
 
+--- Scroll the merged grid so a given tab's first slot is at the top.
+---
+--- The footer's Personal Bank tab indicators call this. Scrolling rather than
+--- filtering is the whole point: the merged view is one container, and swapping
+--- it for a single tab would undo that.
+---
+--- Category view groups by category rather than by tab, so "the top of tab 2"
+--- is not a place there -- the button lookup simply misses and this no-ops.
+function GuildBankFrame:ScrollToTab(tabIndex)
+    if not frame or not frame.scrollFrame or not frame.container then return end
+    if not tabIndex then return end
+
+    local button = buttonsBySlot[tabIndex .. ":1"]
+    if not button then return end
+
+    local containerTop = frame.container:GetTop()
+    local buttonTop = button:GetTop()
+    if not containerTop or not buttonTop then return end
+
+    local offset = containerTop - buttonTop
+    local maxScroll = frame.scrollFrame:GetVerticalScrollRange() or 0
+    if offset < 0 then offset = 0 end
+    if offset > maxScroll then offset = maxScroll end
+    frame.scrollFrame:SetVerticalScroll(offset)
+end
+
 -- True when a reopen can reuse the retained layout and just reconcile changed slots
 -- (fast path) instead of doing a full Refresh. Mirrors BankFrame:CanFastReopen.
 function GuildBankFrame:CanFastReopen()
@@ -2061,21 +2112,17 @@ end
 ns.OnGuildBankKindResolved = function(kind)
     ns:Debug("OnGuildBankKindResolved:", kind)
 
-    -- The Personal Bank opens straight onto tab 1 rather than the merged "All
-    -- Tabs" view. Done on the scanner (not just pinned at render time) so the
-    -- selection state the rest of the file reads agrees with what is drawn.
-    if kind == "personal" and GuildBankScanner
-       and GuildBankScanner:GetSelectedTab() ~= 1 then
-        -- SetSelectedTab fires ns.OnGuildBankTabChanged, which refreshes the
-        -- frame; doing our own Refresh here as well would render twice.
-        GuildBankScanner:SetSelectedTab(1)
-        if frame and frame:IsShown() then
-            UpdateFrameAppearance(true)
-            GuildBankHeader:UpdateTitle()
-        end
-        return
-    end
-
+    -- No personal special case here any more. This used to force
+    -- SetSelectedTab(1); the Personal Bank is now rendered merged across every
+    -- tab it owns, and HandleGuildBankOpened already leaves selectedTabIndex at
+    -- 0 -- so calling the setter would be a no-op that still fired
+    -- ns.OnGuildBankTabChanged and cost a second full render.
+    --
+    -- Dropping it also drops that setter's SetCurrentGuildBankTab side effect,
+    -- which IS load-bearing for drag-and-drop (docs\PERSONAL_BANK_SORT_PLAN.md
+    -- section 1). That is safe only because HandleGuildBankOpened and the
+    -- GUILDBANK_UPDATE_TABS handler both set the current tab independently --
+    -- do not remove those two guards.
     if not frame or not frame:IsShown() then return end
     layoutCached = false
     guildBankLastRenderSig = nil

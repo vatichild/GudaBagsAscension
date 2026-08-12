@@ -19,6 +19,11 @@ local Events = ns:GetModule("Events")
 -- Cache for scanned guild bank data
 local cachedGuildBank = {}
 local cachedTabInfo = {}  -- Tab name, icon, permissions
+-- The tab list GetScanTabs hands out, memoised. Rebuilt only when tab identity
+-- changes (CacheTabInfo) or the session turns over, because the list is read on
+-- every scan pass and every sort and would otherwise re-ask the client for every
+-- tab's info each time (RULES rule 2).
+local scanTabsCache = nil
 local isGuildBankOpen = false
 local selectedTabIndex = 0  -- 0 = all tabs, 1+ = specific tab
 local currentGuildName = nil
@@ -30,6 +35,21 @@ local currentGuildName = nil
 -- cycle -- the storm that made a cold open crawl.
 local isQueryingTabs = false
 local queryStartTime = 0
+
+-- Tab contents are asynchronous: QueryGuildBankTab ASKS the server, and the reply
+-- lands one or more frames later as GUILDBANKBAGSLOTS_CHANGED. ScanAllTabs reads
+-- immediately anyway, which is right for a tab the client already holds -- the
+-- current one -- and worthless for any other. With only tab 1 ever scanned that
+-- never showed; a second Personal Bank tab cached as 98 empty slots, and its own
+-- reply was then swallowed by the "this is our own query" suppression below.
+-- settleTimer is the catch-up read. One timer per ScanAllTabs, replacing any
+-- pending one -- not a poll (RULES rule 2).
+local settleTimer = nil
+local SETTLE_DELAY = 0.4
+
+-- Assigned in the Deferred Save section further down; declared here so the catch-up
+-- pass can reach it (a plain `local function` there would be a nil global to us).
+local ScheduleDeferredSave
 
 -- Set while Sorting\GuildBankSort.lua is moving items. The move events are its
 -- clock, so the data handlers below stand down for the duration rather than
@@ -115,6 +135,22 @@ function GuildBankScanner:RequeryTab(tabIndex)
     QueryViewableTab(tabIndex)
 end
 
+--- Tell the CLIENT which tab is active, without touching our own selection.
+---
+--- SetSelectedTab does this too, but it also fires ns.OnGuildBankTabChanged,
+--- whose handler runs a full GuildBankFrame:Refresh(). The Personal Bank is now
+--- rendered merged with selectedTabIndex pinned at 0, and the sorter walks its
+--- tabs one at a time -- routing that through the setter would re-render the
+--- whole grid on every tab handoff. Same viewable guard, no callback.
+function GuildBankScanner:SetCurrentTab(tabIndex)
+    if not isGuildBankOpen or not tabIndex or tabIndex < 1 then return end
+    if not SetCurrentGuildBankTab then return end
+    local _, _, isViewable = GetGuildBankTabInfo(tabIndex)
+    if isViewable then
+        SetCurrentGuildBankTab(tabIndex)
+    end
+end
+
 function GuildBankScanner:GetTabInfo(tabIndex)
     if not tabIndex or tabIndex < 1 then return nil end
 
@@ -156,6 +192,10 @@ end
 
 function GuildBankScanner:CacheTabInfo()
     cachedTabInfo = {}
+    -- The one place tab identity is rebuilt, so the one place the derived scan
+    -- list has to be dropped. Covers both "a tab was purchased" and the stale
+    -- count the previous container left behind at open.
+    scanTabsCache = nil
     local numTabs = self:GetNumTabs()
 
     for i = 1, numTabs do
@@ -302,23 +342,64 @@ function GuildBankScanner:ScanTab(tabIndex)
     return tabData
 end
 
+--- Personal Bank tabs the character actually owns.
+---
+--- A "Personal Bank Tab Voucher" item exists, so this is not always just tab 1.
+---
+--- The raw API rather than GetTabInfo: that one synthesises a "Tab N" name for a
+--- tab the server sent nothing for (see its comment), which would make an unowned
+--- tab look named. An unowned tab is expected to fail the isViewable gate --
+--- QueryViewableTab and ScanTab already refuse those -- but the name is checked
+--- too, because a tab that reports viewable while carrying no identity is exactly
+--- the phantom that would pad the merged grid with 98 empty slots.
+local function ComputePersonalTabs(numTabs)
+    local tabs = {}
+    for i = 1, numTabs do
+        local name, _, isViewable = GetGuildBankTabInfo(i)
+        if isViewable and name and name ~= "" then
+            tabs[#tabs + 1] = i
+        end
+    end
+    -- Never hand back nothing. Tab identity arrives after the open, so a pass
+    -- that runs in that window must still address tab 1 -- which is what this
+    -- returned unconditionally before it learned about the others.
+    if #tabs == 0 then tabs[1] = 1 end
+    return tabs
+end
+
 --- Tabs worth querying and scanning, as a plain array.
 ---
---- The Personal Bank is displayed as tab 1 only (UI\GuildBankFrame.lua pins the
---- selection), but this client reports THREE tabs for it -- so scanning "all"
---- meant 3 server queries and 294 slot reads per pass to render 98 slots. The
---- guild bank still scans every tab: its All-Tabs view shows them, and its cache
---- feeds the offline view.
+--- This returned a literal { 1 } for personal sessions, on the reading that the
+--- client reports three tabs for a one-tab Personal Bank and scanning "all" cost
+--- 3 queries + 294 slot reads to render 98 slots. **That reading was wrong.** The
+--- three tabs were the *guild* bank's (its saved tabInfo has exactly three
+--- entries; the Personal Bank's has one), read during the window before
+--- GUILDBANK_UPDATE_TABS replaces the previous container's count. GetNumTabs is
+--- honest about the Personal Bank once tab data has landed.
+---
+--- The perf intent survives: this is still "tabs we display", never "tabs the
+--- client reports", and the answer is memoised in scanTabsCache. What changes is
+--- that a character who bought a second Personal Bank tab now gets it scanned
+--- instead of silently losing everything stored in it.
 function GuildBankScanner:GetScanTabs()
+    if scanTabsCache then return scanTabsCache end
+
     local numTabs = self:GetNumTabs()
+    -- Deliberately not memoised: this is the pre-tab-data window, and caching it
+    -- would pin the whole session to zero tabs.
     if numTabs == 0 then return {} end
 
+    local tabs
     if self:GetSessionKind() == "personal" then
-        return { 1 }
+        tabs = ComputePersonalTabs(numTabs)
+    else
+        -- The guild bank scans every tab: its All-Tabs view shows them, and its
+        -- cache feeds the offline view.
+        tabs = {}
+        for i = 1, numTabs do tabs[i] = i end
     end
 
-    local tabs = {}
-    for i = 1, numTabs do tabs[i] = i end
+    scanTabsCache = tabs
     return tabs
 end
 
@@ -346,10 +427,52 @@ function GuildBankScanner:ScanAllTabs()
         QueryViewableTab(i)
     end
 
-    -- Scan each tab (data may not be fully loaded yet, but scan what's available)
+    -- Opportunistic pass: whatever the client already holds shows instantly. For
+    -- the tab the player is looking at that is everything; for a tab queried a
+    -- microsecond ago it is nothing, which is what the catch-up below is for.
     for _, i in ipairs(tabs) do
         self:ScanTab(i)
     end
+
+    -- Catch-up. Re-read once the server has had time to answer, and only tell the
+    -- UI if something actually changed -- on a single-tab bank nothing does, so
+    -- this costs one timer and no redraw.
+    if settleTimer then settleTimer:Cancel() end
+    settleTimer = C_Timer.NewTimer(SETTLE_DELAY, function()
+        settleTimer = nil
+        if not isGuildBankOpen then return end
+        -- A sort owns the refresh cycle while it runs; it re-scans its own tab and
+        -- does one authoritative pass at the end.
+        if sortInProgress then return end
+
+        -- Re-derived rather than captured: the session kind can resolve inside
+        -- this window, which changes which tabs GetScanTabs reports.
+        local settleTabs = GuildBankScanner:GetScanTabs()
+        local changed, newTab = false, false
+        for _, i in ipairs(settleTabs) do
+            local before = cachedGuildBank[i]
+            local beforeFree = before and before.freeSlots
+            GuildBankScanner:ScanTab(i)
+            local after = cachedGuildBank[i]
+            if after and not before then newTab = true end
+            if beforeFree ~= (after and after.freeSlots) then changed = true end
+        end
+
+        if not changed then return end
+        ns:Debug("ScanAllTabs: catch-up pass found late tab data, newTab =", newTab)
+        if ScheduleDeferredSave then ScheduleDeferredSave() end
+
+        -- A tab that had no cache entry at render time has no buttons either, and
+        -- IncrementalUpdate only refills buttons that already exist -- so a tab
+        -- appearing for the first time needs the full path. That is exactly what
+        -- OnGuildBankTabsUpdated is for ("also when tabs are purchased"), and it
+        -- is queued, so a burst of these coalesces into one render.
+        if newTab and ns.OnGuildBankTabsUpdated then
+            ns.OnGuildBankTabsUpdated()
+        elseif ns.OnGuildBankUpdated then
+            ns.OnGuildBankUpdated()
+        end
+    end)
 
     ns:Debug("ScanAllTabs: Complete, cached tabs =", self:CountCachedTabs())
     return cachedGuildBank
@@ -473,9 +596,9 @@ function GuildBankScanner:LoadPersonalFromDatabase()
         end
     end
 
-    -- Tab 1, not the merged "All Tabs" view: the offline copy is presented the
-    -- same single-container way as a live personal session.
-    selectedTabIndex = 1
+    -- 0 = no tab filter. The offline copy is presented merged across every stored
+    -- tab, exactly like a live personal session.
+    selectedTabIndex = 0
     ns:Debug("Loaded cached personal bank for:", charKey, "tabs =", self:CountCachedTabs())
     return true
 end
@@ -542,7 +665,7 @@ end
 -- Deferred Save
 -------------------------------------------------
 
-local function ScheduleDeferredSave()
+ScheduleDeferredSave = function()
     if saveTimer then
         saveTimer:Cancel()
     end
@@ -663,6 +786,7 @@ end
 --- derive a kind from, so the frame states it explicitly.
 function GuildBankScanner:SetSessionKind(kind)
     sessionKind = kind
+    scanTabsCache = nil
 end
 
 local function ResolveBankKind()
@@ -671,6 +795,11 @@ local function ResolveBankKind()
     local kind = GuildBankScanner:GetBankKind()
     if kind == "unknown" then return end
     sessionKind = kind
+    -- GetScanTabs branches on the kind, and the open scan runs before this is
+    -- known -- so anything memoised until now was computed down the guild branch.
+    -- Dropped here rather than relying on CacheTabInfo running after us: both are
+    -- GUILDBANK_UPDATE_TABS handlers and this must not depend on their order.
+    scanTabsCache = nil
     -- Debug rather than Print: the window title names the bank now, and a
     -- permanent chat line would be user-facing text with no locale entry.
     ns:Debug(kind == "personal" and "Personal Bank Opened" or "Guild Bank Opened")
@@ -694,6 +823,9 @@ local function HandleGuildBankOpened()
     currentGuildName = GetGuildInfo("player")
     selectedTabIndex = 0  -- Reset to show all tabs
     sessionKind = nil
+    -- Same reasoning as the cachedGuildBank wipe below: a list derived from the
+    -- last container's tab count must not survive into this one.
+    scanTabsCache = nil
 
     -- Drop whatever the last session left here. cachedGuildBank survives in
     -- memory across opens, so a container with FEWER tabs than the last one
@@ -751,6 +883,11 @@ local function HandleGuildBankClosed()
     isGuildBankOpen = false
     dirtyTabs = {}
     sessionKind = nil
+    scanTabsCache = nil
+    if settleTimer then
+        settleTimer:Cancel()
+        settleTimer = nil
+    end
 
     ns:Debug("Guild bank closed")
 
@@ -986,7 +1123,10 @@ Events:Register("GUILDBANK_ITEM_LOCK_CHANGED", function(event, tabIndex, slotInd
 
             if not isGuildBankOpen then return end
 
-            -- Rescan the displayed tabs only (see GetScanTabs)
+            -- Rescan the displayed tabs (see GetScanTabs), not just the one the
+            -- event named. A drag that moves an item BETWEEN tabs changes two of
+            -- them and the event reports one, so scanning only targetTab would
+            -- leave the other showing a stale slot.
             local tabs = GuildBankScanner:GetScanTabs()
             ns:Debug("  Scanning", #tabs, "tabs after lock change")
 
