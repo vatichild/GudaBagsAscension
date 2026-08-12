@@ -1180,6 +1180,18 @@ function LayoutEngine:CalculateCategoryFrameSize(sections, settings)
     return frameWidth, frameHeight
 end
 
+--- Height of the laid-out category blocks, with no frame chrome added.
+---
+--- CalculateCategoryFrameSize above wraps this in the bag/bank chrome model
+--- (MIN_WIDTH, its own search/footer offsets), which does not fit the guild bank
+--- window -- that one has side tabs, its own scroll frame and GUILD_BANK_MIN_*.
+--- Exposing the raw height lets UI\GuildBankFrame.lua keep its own chrome math
+--- while still measuring the content with the same iterator that positions it,
+--- so size and layout cannot drift apart.
+function LayoutEngine:GetCategoryContentHeight(sections, settings)
+    return IterateCategoryLayout(sections, settings, function() end)
+end
+
 -- Calculate positions for category view
 -- Returns { headers = { {section, x, y, width} }, items = { {item, x, y} } }
 function LayoutEngine:CalculateCategoryPositions(sections, settings)

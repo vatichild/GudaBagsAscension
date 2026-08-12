@@ -1015,16 +1015,29 @@ local function ReleaseAllGuildBankItems()
     cachedItemCount = {}
 end
 
--- Place a single header or item slot. Mutates st.currentY / st.currentCol the
--- same way the original inline Refresh loop did. Buttons/headers are reused in
--- place across refreshes (by slot key / by index) so a re-render updates content
--- without a visible blank; leftovers are released in FinishRender.
+-- Place a single header or item slot. Buttons/headers are reused in place across
+-- refreshes (by slot key / by index) so a re-render updates content without a
+-- visible blank; leftovers are released in FinishRender.
+--
+-- Two positioning modes. An op carries its own x/y when the layout was computed
+-- up front -- category view, where LayoutEngine packs blocks side by side and a
+-- position cannot be derived from a running column counter. The flat tab view has
+-- no precomputed position and still flows through currentCol/currentY exactly as
+-- it always did. Either way st.currentY tracks the op being placed, because the
+-- sync pass reads it to decide where the viewport ends.
 local function RenderOneSlot(slotInfo, st)
     if slotInfo.isHeader then
-        -- Start new row if needed
-        if st.currentCol > 0 then
-            st.currentY = st.currentY - st.iconSize - st.spacing
-            st.currentCol = 0
+        local x, y
+        if slotInfo.y then
+            x, y = slotInfo.x, slotInfo.y
+            st.currentY = y
+        else
+            -- Start new row if needed
+            if st.currentCol > 0 then
+                st.currentY = st.currentY - st.iconSize - st.spacing
+                st.currentCol = 0
+            end
+            x, y = 0, st.currentY
         end
 
         -- Reuse the header at this position if one already exists, else acquire.
@@ -1035,22 +1048,48 @@ local function RenderOneSlot(slotInfo, st)
             categoryHeaders[st.usedHeaders] = header
         end
         header.text:SetText(slotInfo.tabName or "Tab")
+        -- The text must be re-anchored either way: the pool anchors it to the
+        -- icon's right (UI\CategoryHeaderPool.lua), so hiding the icon alone still
+        -- leaves the title indented by icon width + gap, and headers are recycled
+        -- between the two styles.
+        header.text:ClearAllPoints()
         if slotInfo.tabIcon then
             header.icon:SetTexture(slotInfo.tabIcon)
             header.icon:Show()
+            header.text:SetPoint("LEFT", header.icon, "RIGHT", 4, 0)
         else
             header.icon:Hide()
+            header.text:SetPoint("LEFT", header, "LEFT", 0, 0)
         end
+
+        -- Same title treatment as the bag and bank category headers.
+        local _, _, fontFlags = header.text:GetFont()
+        if st.iconSize < Constants.CATEGORY_ICON_SIZE_THRESHOLD then
+            Font:Apply(header.text, Constants.CATEGORY_FONT_SMALL, fontFlags)
+        else
+            Font:Apply(header.text, Constants.CATEGORY_FONT_LARGE, fontFlags)
+        end
+        if slotInfo.hideLine then header.line:Hide() else header.line:Show() end
+
         header:ClearAllPoints()
-        header:SetPoint("TOPLEFT", frame.container, "TOPLEFT", 0, st.currentY)
-        header:SetWidth(st.contentWidth)
+        header:SetPoint("TOPLEFT", frame.container, "TOPLEFT", x, y)
+        -- Block width in category view, full grid width for a tab header.
+        header:SetWidth(slotInfo.width or st.contentWidth)
         header:Show()
 
-        st.currentY = st.currentY - st.headerHeight
+        if not slotInfo.y then
+            st.currentY = st.currentY - st.headerHeight
+        end
     else
         -- Regular slot
-        local x = st.currentCol * (st.iconSize + st.spacing)
-        local y = st.currentY
+        local x, y
+        if slotInfo.y then
+            x, y = slotInfo.x, slotInfo.y
+            st.currentY = y
+        else
+            x = st.currentCol * (st.iconSize + st.spacing)
+            y = st.currentY
+        end
 
         local slotKey = slotInfo.tabIndex .. ":" .. slotInfo.slot
         -- Reuse the existing button for this slot (no hide/re-show flicker) or
@@ -1100,11 +1139,13 @@ local function RenderOneSlot(slotInfo, st)
 
         table.insert(itemButtons, button)
 
-        -- Advance position
-        st.currentCol = st.currentCol + 1
-        if st.currentCol >= st.columns then
-            st.currentCol = 0
-            st.currentY = st.currentY - st.iconSize - st.spacing
+        -- Advance position (flat view only -- a precomputed op owns its own spot)
+        if not slotInfo.y then
+            st.currentCol = st.currentCol + 1
+            if st.currentCol >= st.columns then
+                st.currentCol = 0
+                st.currentY = st.currentY - st.iconSize - st.spacing
+            end
         end
     end
 end
@@ -1355,11 +1396,14 @@ function GuildBankFrame:Refresh()
     table.sort(sortedTabs, function(a, b) return a.index < b.index end)
 
     -- Personal Bank in category view: reuse the bag/bank category engine rather
-    -- than a second implementation. BuildCategorySections works on itemData, and
-    -- the renderer below already draws `isHeader` entries -- so a section becomes
-    -- a header plus its items and nothing new has to know about categories.
+    -- than a second implementation -- both the grouping (BuildCategorySections)
+    -- and the geometry (CalculateCategoryPositions), so the window reads exactly
+    -- like the bag and bank ones. Ops carry absolute positions; see RenderOneSlot.
     local personalCategoryView = isPersonal
         and (Database:GetSetting("bankViewType") == "category")
+
+    -- Set by the branch below; nil means "measure the flat view the old way".
+    local categoryContentHeight = nil
 
     if personalCategoryView then
         local items = {}
@@ -1403,14 +1447,46 @@ function GuildBankFrame:Refresh()
             items, not isGuildBankOpen, emptyCount, firstEmptySlot,
             0, nil, nil, nil, 0, nil)
 
-        for _, section in ipairs(sections) do
+        -- Geometry from LayoutEngine, the same packer bags and bank use: each
+        -- category claims only the columns it needs and the next one sits beside
+        -- it, wrapping on width and breaking to a new row between groups. The old
+        -- code flattened sections into the linear renderer instead, which made
+        -- every category a full-width band.
+        local catSettings = { columns = columns, iconSize = iconSize, spacing = spacing }
+        local layout = LayoutEngine:CalculateCategoryPositions(sections, catSettings)
+        categoryContentHeight = LayoutEngine:GetCategoryContentHeight(sections, catSettings)
+
+        -- CalculateCategoryPositions tags every item with the section it belongs
+        -- to, so the ops can be grouped without relying on the two result arrays
+        -- staying in step.
+        local itemsByCategory = {}
+        for _, pos in ipairs(layout.items) do
+            local bucket = itemsByCategory[pos.categoryId]
+            if not bucket then
+                bucket = {}
+                itemsByCategory[pos.categoryId] = bucket
+            end
+            bucket[#bucket + 1] = pos
+        end
+
+        for _, headerPos in ipairs(layout.headers) do
+            local section = headerPos.section
             allSlots[#allSlots + 1] = {
                 isHeader = true,
                 tabIndex = (firstEmptySlot and firstEmptySlot.bagID) or 1,
                 tabName = section.categoryName or "",
-                tabIcon = section.categoryIcon,
+                -- No icon, matching UI\BagFrame.lua and UI\BankFrame.lua, which
+                -- both hide it in category view. section.categoryIcon is
+                -- deliberately not passed on.
+                tabIcon = nil,
+                x = headerPos.x,
+                y = headerPos.y,
+                width = headerPos.width,
+                -- A one-item section has nothing to rule off.
+                hideLine = (#section.items <= 1),
             }
-            for _, item in ipairs(section.items) do
+            for _, pos in ipairs(itemsByCategory[section.categoryId] or {}) do
+                local item = pos.item
                 local itemData = item.itemData
                 -- The collapsed "Empty (N)" tile already carries the first free
                 -- tab/slot (BuildCategorySections copies it off firstEmptySlot);
@@ -1422,9 +1498,23 @@ function GuildBankFrame:Refresh()
                     tabIndex = itemData and itemData.bagID or item.bagID,
                     slot = itemData and itemData.slot or item.slot,
                     itemData = itemData,
+                    x = pos.x,
+                    y = pos.y,
                 }
             end
         end
+
+        -- Top-down order, so the sync pass's "stop once past the viewport" test
+        -- still means what it says. Blocks sit side by side now, so section order
+        -- alone would walk down a tall block and then jump back up to its
+        -- neighbour, cutting off content that is actually on screen.
+        table.sort(allSlots, function(a, b)
+            if a.y ~= b.y then return a.y > b.y end
+            if a.x ~= b.x then return a.x < b.x end
+            -- A header shares its block's top edge with nothing else, but keep it
+            -- ahead of its items for a stable order.
+            return (a.isHeader and 1 or 0) > (b.isHeader and 1 or 0)
+        end)
 
         sortedTabs = {}   -- consumed; skip the flat gather below
     end
@@ -1484,9 +1574,16 @@ function GuildBankFrame:Refresh()
         end
     end
     local contentWidth = (iconSize * columns) + (spacing * (columns - 1))
-    local headerHeight = 20
+    local headerHeight = LayoutEngine:GetCategoryHeaderHeight()
     -- Calculate height: item rows + spacing between rows + headers (not double-counted)
     local actualContentHeight = (iconSize * itemRows) + (spacing * math.max(0, itemRows - 1)) + (headerCount * headerHeight)
+
+    -- Category view is not a stack of full-width rows, so the walk above cannot
+    -- measure it. Take the height straight from the iterator that positioned the
+    -- blocks, which is what keeps size and layout in agreement.
+    if categoryContentHeight then
+        actualContentHeight = categoryContentHeight
+    end
 
     -- Calculate frame dimensions
     local showSearchBar = GuildBankFrame:IsSearchBarVisible()
@@ -2136,6 +2233,13 @@ local function OnSettingChanged(event, key, value)
     elseif key == "guildBankColumns" or key == "iconSize" or key == "iconSpacing" then
         -- Column/size changes need full refresh
         UpdateFrameAppearance(true)  -- Refresh below restyles buttons
+        GuildBankFrame:Refresh()
+    elseif key == "bankViewType" then
+        -- The Personal Bank shares this key with the Bank window and has no view
+        -- cycle button of its own, so without this an open window kept the old
+        -- layout until some unrelated refresh happened to fire.
+        layoutCached = false
+        guildBankLastRenderSig = nil
         GuildBankFrame:Refresh()
     elseif key == "showFooter" or key == "showSearchBar" or key == "showFilterChips" or key == "hiddenChips" then
         UpdateFrameAppearance(true)  -- Refresh below restyles buttons
