@@ -444,6 +444,60 @@ function Database:PruneSetProtectionExceptions(isInSetFunc)
     end
 end
 
+-------------------------------------------------
+-- Equipment Set Slot Cache (per-character)
+-------------------------------------------------
+--
+-- Last itemID the equipment manager reported for a given set slot.
+--
+-- WHY THIS EXISTS: GetEquipmentSetItemIDs returns **-1** for a slot whose item the
+-- manager cannot locate, and it cannot address a guild-bank container -- so moving
+-- a set item into Ascension's Personal Bank makes the set forget it, the item
+-- loses its set mark, and it drops out of the equipment-set filter. Measured with
+-- /guda diag equipsets: the same itemIDs resolve for one set and come back -1 for
+-- another, because a set stores an item INSTANCE, not just an id.
+--
+-- Keyed by set name + inventory slot, which is the stable identity inside a set.
+-- Self-correcting: any real itemID (or 0 for "slot cleared") overwrites the memory,
+-- so only a slot that stays unlocatable keeps using it.
+--
+-- Lazily created with no schema entry or migration, exactly like
+-- setProtectionExceptions above -- an absent table simply reads as empty.
+
+local function EquipSetSlotKey(setName, slot)
+    return tostring(setName) .. ":" .. tostring(slot)
+end
+
+function Database:GetEquipSetSlotItem(setName, slot)
+    if not setName or not slot then return nil end
+    if not GudaBags_CharDB or not GudaBags_CharDB.equipSetSlotCache then return nil end
+    return GudaBags_CharDB.equipSetSlotCache[EquipSetSlotKey(setName, slot)]
+end
+
+function Database:SetEquipSetSlotItem(setName, slot, itemID)
+    if not setName or not slot or not GudaBags_CharDB then return end
+    GudaBags_CharDB.equipSetSlotCache = GudaBags_CharDB.equipSetSlotCache or {}
+    GudaBags_CharDB.equipSetSlotCache[EquipSetSlotKey(setName, slot)] = itemID
+end
+
+--- Drop remembered slots for sets that no longer exist, so a deleted or renamed
+--- set cannot keep marking items forever.
+function Database:PruneEquipSetSlotCache(liveSetNames)
+    if not GudaBags_CharDB or not GudaBags_CharDB.equipSetSlotCache then return end
+    if type(liveSetNames) ~= "table" then return end
+
+    local keep = {}
+    for _, name in pairs(liveSetNames) do keep[tostring(name)] = true end
+
+    for key in pairs(GudaBags_CharDB.equipSetSlotCache) do
+        -- Set names may contain ":", so match the slot suffix from the right.
+        local setName = key:match("^(.*):[^:]+$")
+        if not setName or not keep[setName] then
+            GudaBags_CharDB.equipSetSlotCache[key] = nil
+        end
+    end
+end
+
 function Database:GetCurrentCharacter()
     local fullName = GetPlayerFullName()
     if not fullName then return nil end

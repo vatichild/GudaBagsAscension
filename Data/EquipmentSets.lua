@@ -93,24 +93,59 @@ end
 -- Blizzard Equipment Manager (Retail / Wrath+)
 -------------------------------------------------
 
+--- Scan Blizzard's equipment manager.
+---
+--- Handles the **-1 slot**. GetEquipmentSetItemIDs reports `-1` for a slot whose
+--- item the manager cannot locate, and it has no concept of a guild-bank
+--- container -- so an item parked in Ascension's Personal Bank silently drops out
+--- of its set, taking its set mark and its filter entry with it. Measured with
+--- /guda diag equipsets: the same itemIDs resolve for one set and read -1 in
+--- another, because a set stores an item INSTANCE, not just an id.
+---
+--- So each resolvable slot is remembered, and an unresolvable one falls back to
+--- what that slot held last time. Self-correcting: a real itemID or a 0 (slot
+--- cleared) overwrites the memory, so only a slot that stays unlocatable keeps it.
 local function ScanBlizzardSets()
     if not C_EquipmentSet then return end
 
     local setIDs = C_EquipmentSet.GetEquipmentSetIDs()
     if not setIDs then return end
 
+    local Database = ns:GetModule("Database")
+    local liveNames = {}
+
     for _, setID in ipairs(setIDs) do
         local name = C_EquipmentSet.GetEquipmentSetInfo(setID)
         if name then
+            liveNames[#liveNames + 1] = name
             local itemIDs = C_EquipmentSet.GetItemIDs(setID)
             if itemIDs then
-                for _, itemID in pairs(itemIDs) do
+                for slot, itemID in pairs(itemIDs) do
                     if itemID and itemID > 0 then
                         AddItem(itemID, name)
+                        if Database then
+                            Database:SetEquipSetSlotItem(name, slot, itemID)
+                        end
+                    elseif itemID and itemID < 0 and Database then
+                        -- Unlocatable. Fall back to what this slot held last time;
+                        -- deliberately NOT written back, so the memory only ever
+                        -- comes from a slot the manager could actually resolve.
+                        local remembered = Database:GetEquipSetSlotItem(name, slot)
+                        if remembered and remembered > 0 then
+                            AddItem(remembered, name)
+                        end
+                    elseif itemID == 0 and Database then
+                        -- Slot genuinely cleared -- forget it, or the set would
+                        -- keep marking an item the user removed from it.
+                        Database:SetEquipSetSlotItem(name, slot, nil)
                     end
                 end
             end
         end
+    end
+
+    if Database and Database.PruneEquipSetSlotCache then
+        Database:PruneEquipSetSlotCache(liveNames)
     end
 end
 
@@ -166,6 +201,17 @@ function EquipmentSets:GetSetNames(itemID)
         names[#names + 1] = name
     end
     return names
+end
+
+--- Every itemID currently tracked, for /guda diag equipsets. Returns a copy, so a
+--- caller cannot mutate the live lookup.
+function EquipmentSets:GetTrackedItemIDs()
+    local ids = {}
+    for itemID in pairs(itemSets) do
+        ids[#ids + 1] = itemID
+    end
+    table.sort(ids)
+    return ids
 end
 
 function EquipmentSets:GetAllSetNames()

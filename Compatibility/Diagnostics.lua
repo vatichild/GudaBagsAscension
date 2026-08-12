@@ -1657,8 +1657,130 @@ local function DumpGuildBankSort()
     end
 end
 
---- /guda diag [shim|mouse|children|restack|mog|markers|guid|taint|currency|bank|gbsort|unblock]
+--- What the equipment manager reports, versus what GudaBags tracks.
+---
+--- Reported symptom: moving set items into the Personal Bank makes their set marks
+--- disappear and drops them out of the equipment-set filter. `EquipmentSets` is
+--- keyed purely by itemID, with no notion of where an item lives, so the loss has
+--- to happen upstream -- in what the API reports. Printing both sides side by side
+--- says which, without guessing.
+---
+--- Run it once with the items in bags, and once with them in the Personal Bank.
+local function DumpEquipmentSets()
+    line("=== equipment sets ===")
+
+    -- Which APIs actually exist here. C_EquipmentSet is Ascension's own table with
+    -- the shim's methods filled in around it (docs\ASCENSION-API.md section 8), so
+    -- the WotLK globals underneath are what really answer.
+    line("globals: GetNumEquipmentSets=%s | GetEquipmentSetInfo=%s | GetEquipmentSetItemIDs=%s",
+        type(GetNumEquipmentSets), type(GetEquipmentSetInfo), type(GetEquipmentSetItemIDs))
+    line("         GetEquipmentSetItemGUIDs=%s | GetEquipmentSetLocations=%s",
+        type(GetEquipmentSetItemGUIDs), type(GetEquipmentSetLocations))
+    if C_EquipmentSet then
+        local members = {}
+        for k in pairs(C_EquipmentSet) do members[#members + 1] = tostring(k) end
+        table.sort(members)
+        line("C_EquipmentSet: %s", table.concat(members, ", "))
+    else
+        line("C_EquipmentSet: ABSENT")
+    end
+    line("numSets=%s", safeCall(GetNumEquipmentSets))
+
+    local ok, setIDs = pcall(function()
+        return C_EquipmentSet and C_EquipmentSet.GetEquipmentSetIDs and C_EquipmentSet.GetEquipmentSetIDs()
+    end)
+    if not ok or not setIDs then
+        line("GetEquipmentSetIDs unusable -- nothing further to read")
+        return
+    end
+
+    -- The addon's side FIRST, so a set that blows up below cannot cost us the
+    -- comparison. The first run of this dump ended abruptly after a set name with
+    -- no error and no data, because the outer pcall swallowed whatever went wrong
+    -- and everything after it was lost.
+    local EquipSets = ns:GetModule("EquipmentSets")
+    if not EquipSets or not EquipSets.GetTrackedItemIDs then
+        line("EquipmentSets module or GetTrackedItemIDs ABSENT -- old build loaded?")
+    else
+        local tracked = EquipSets:GetTrackedItemIDs()
+        line("GudaBags tracks %d itemIDs across sets: %s", #tracked,
+            table.concat(EquipSets:GetAllSetNames() or {}, ", "))
+        for i = 1, #tracked do
+            local itemID = tracked[i]
+            local names = EquipSets:GetSetNames(itemID) or {}
+            line("  tracked %s (%s) -> %s", tostring(itemID),
+                tostring(GetItemInfo(itemID)), table.concat(names, ", "))
+        end
+    end
+
+    for _, setID in ipairs(setIDs) do
+        local name = safeCall(function() return C_EquipmentSet.GetEquipmentSetInfo(setID) end)
+        line("set %s: %s", tostring(setID), tostring(name))
+
+        -- Each set in its own pcall, with the error PRINTED. One set that cannot
+        -- be read must not hide the others -- and if reading a set raises, that
+        -- fact is itself the finding.
+        local okSet, errSet = pcall(function()
+            -- The raw table, verbatim. On WotLK this is indexed by inventory slot;
+            -- what a slot reports for an item the manager cannot locate is exactly
+            -- what this dump exists to establish.
+            local okIDs, itemIDs = pcall(C_EquipmentSet.GetItemIDs, setID)
+            if not okIDs then
+                line("  GetItemIDs RAISED: %s", tostring(itemIDs))
+                return
+            end
+            if type(itemIDs) ~= "table" then
+                line("  GetItemIDs -> %s (%s)", tostring(itemIDs), type(itemIDs))
+                return
+            end
+            local shown = 0
+            for slot, itemID in pairs(itemIDs) do
+                shown = shown + 1
+                local label = "empty"
+                if tostring(itemID) ~= "0" then
+                    local okName, itemName = pcall(GetItemInfo, itemID)
+                    label = okName and tostring(itemName) or "GetItemInfo raised"
+                end
+                line("  slot %s -> %s (%s)", tostring(slot), tostring(itemID), label)
+            end
+            if shown == 0 then line("  GetItemIDs returned an EMPTY table") end
+        end)
+        if not okSet then
+            line("  set %s DUMP ERRORED: %s", tostring(setID), tostring(errSet))
+        end
+
+        -- Second opinion from the raw WotLK global, bypassing the shim wrapper.
+        if type(GetEquipmentSetItemIDs) == "function" and name and name ~= "nil" then
+            local okRaw, rawIDs = pcall(GetEquipmentSetItemIDs, name)
+            if not okRaw then
+                line("  GetEquipmentSetItemIDs(%s) RAISED: %s", tostring(name), tostring(rawIDs))
+            elseif type(rawIDs) ~= "table" then
+                line("  GetEquipmentSetItemIDs(%s) -> %s", tostring(name), tostring(rawIDs))
+            else
+                local n = 0
+                for _ in pairs(rawIDs) do n = n + 1 end
+                line("  GetEquipmentSetItemIDs(%s) -> table with %d entries", tostring(name), n)
+            end
+        end
+    end
+end
+
+--- /guda diag [shim|mouse|children|restack|mog|markers|guid|taint|currency|bank|gbsort|equipsets|unblock]
 function Diagnostics:Dispatch(arg)
+    if arg == "equipsets" then
+        report = {}
+        -- Error surfaced, not swallowed: the first version of this ended silently
+        -- mid-dump and the reason went with it.
+        local okDump, errDump = pcall(DumpEquipmentSets)
+        if not okDump then
+            report[#report + 1] = "DUMP ERRORED: " .. tostring(errDump)
+            DEFAULT_CHAT_FRAME:AddMessage("|cffff5555[diag]|r dump errored: " .. tostring(errDump))
+        end
+        GudaBags_Diag = report
+        DEFAULT_CHAT_FRAME:AddMessage(
+            "|cff00ccff[diag]|r saved to GudaBags_Diag -- /reload to write it to disk")
+        return
+    end
     if arg == "gbsort" then
         report = {}
         pcall(DumpGuildBankSort)
