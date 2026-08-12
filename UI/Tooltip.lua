@@ -49,6 +49,9 @@ local function AddInventorySection(tooltip, itemID, skipReadyCheck)
     local youSuffix = L["TOOLTIP_YOU"] or " (you)"
     local labelBags = L["TOOLTIP_BAGS"] or "Bags"
     local labelBank = L["TOOLTIP_BANK_LOWER"] or "Bank"
+    -- Abbreviated on purpose: this line is a comma-joined list and "Personal Bank"
+    -- next to Bags/Bank/Mail/Equipped pushes it past the tooltip width.
+    local labelPersonalBank = L["TOOLTIP_PERSONAL_BANK_SHORT"] or "P Bank"
     local labelMail = L["TOOLTIP_MAIL_LOWER"] or "Mail"
     local labelEquipped = L["TOOLTIP_EQUIPPED"] or "Equipped"
 
@@ -72,6 +75,11 @@ local function AddInventorySection(tooltip, itemID, skipReadyCheck)
         end
         if charInfo.bankCount and charInfo.bankCount > 0 then
             table.insert(countParts, cyan .. labelBank .. ": " .. white .. charInfo.bankCount .. "|r")
+        end
+        -- Ascension's Personal Bank sits with the other per-character stores, not
+        -- on its own line like a guild bank: it belongs to this character.
+        if charInfo.personalBankCount and charInfo.personalBankCount > 0 then
+            table.insert(countParts, cyan .. labelPersonalBank .. ": " .. white .. charInfo.personalBankCount .. "|r")
         end
         if charInfo.mailCount and charInfo.mailCount > 0 then
             table.insert(countParts, cyan .. labelMail .. ": " .. white .. charInfo.mailCount .. "|r")

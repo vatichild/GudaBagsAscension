@@ -990,8 +990,9 @@ local function CountItemsInContainers(containers, itemID)
     return count
 end
 
--- Count items by itemID across all characters (bags + bank + warband bank)
--- Returns: totalCount, characterCounts (table of {name, class, count, bagCount, bankCount, ...}), warbandCount
+-- Count items by itemID across all characters (bags + bank + personal bank +
+-- mail + equipped), plus the account-wide warband and guild banks.
+-- Returns: totalCount, characterCounts (table of {name, class, count, bagCount, bankCount, ...}), warbandCount, guildBankCounts
 function Database:CountItemAcrossCharacters(itemID)
     if not itemID then return 0, {}, 0 end
 
@@ -1034,7 +1035,19 @@ function Database:CountItemAcrossCharacters(itemID)
             end
         end
 
-        local charCount = bagCount + bankCount + mailCount + equippedCount
+        -- Ascension's Personal Bank. Per character, not account-wide like a guild
+        -- bank, so it belongs on this character's line rather than a line of its
+        -- own -- and it is keyed by the same "name-realm" string as
+        -- GudaBags_DB.characters (Database GetPlayerFullName and
+        -- GuildBankScanner:GetPersonalBankKey build it identically). Its tabs each
+        -- carry a .slots table, which is the shape CountItemsInContainers reads.
+        local personalBankCount = 0
+        local personalBank = GudaBags_DB.personalBanks and GudaBags_DB.personalBanks[fullName]
+        if personalBank and personalBank.tabs then
+            personalBankCount = CountItemsInContainers(personalBank.tabs, itemID)
+        end
+
+        local charCount = bagCount + bankCount + mailCount + equippedCount + personalBankCount
 
         if charCount > 0 then
             table.insert(characterCounts, {
@@ -1048,6 +1061,7 @@ function Database:CountItemAcrossCharacters(itemID)
                 bankCount = bankCount,
                 mailCount = mailCount,
                 equippedCount = equippedCount,
+                personalBankCount = personalBankCount,
                 isCurrent = (fullName == currentFullName),
             })
             totalCount = totalCount + charCount

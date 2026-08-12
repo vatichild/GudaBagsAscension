@@ -1602,7 +1602,16 @@ function GuildBankFrame:Refresh()
     local frameWidth = math.max(contentWidth + (Constants.FRAME.PADDING * 2), Constants.FRAME.GUILD_BANK_MIN_WIDTH)
     local frameHeightNeeded = actualContentHeight + chromeHeight
 
-    local adjustedFrameHeight = math.max(frameHeightNeeded, Constants.FRAME.GUILD_BANK_MIN_HEIGHT)
+    -- The 340px floor exists for the guild bank's side tab strip, which needs the
+    -- vertical room for up to six tabs. The Personal Bank hides that strip
+    -- entirely, so the floor only padded the window with empty space -- very
+    -- visible in category view, where blocks pack side by side and the content is
+    -- short. Fall back to the addon's generic floor, the same one the bag window
+    -- uses, so the window still cannot collapse to a sliver mid-render.
+    local minFrameHeight = isPersonal
+        and Constants.FRAME.MIN_HEIGHT
+        or Constants.FRAME.GUILD_BANK_MIN_HEIGHT
+    local adjustedFrameHeight = math.max(frameHeightNeeded, minFrameHeight)
 
     local screenHeight = UIParent:GetHeight()
     local maxFrameHeight = screenHeight - 100
